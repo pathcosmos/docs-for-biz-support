@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Iterable
 
 import libsql_client
+from libsql_client import Statement
 
 from .models import Item
 
@@ -111,26 +112,22 @@ def insert_seed_snapshot(
         return 0
     snap_iso = snapshot_date.isoformat()
 
-    # libsql-client's TransactionSync context manager only close()s on exit —
-    # it does NOT auto-commit. Call commit() explicitly inside the block;
-    # if any execute() raises, the with-block exits without commit and the
-    # transaction is closed (rolled back) by close().
-    tx = client.transaction()
-    try:
-        for it in items:
-            tx.execute(
-                _UPSERT_ITEM_SQL,
-                _item_row(it, archive_key, first_seen=snap_iso, last_seen=snap_iso),
-            )
-            tx.execute(
-                "INSERT OR REPLACE INTO daily_status "
-                "(snapshot_date, stable_id, archive_key, status) "
-                "VALUES (?, ?, ?, 'ongoing')",
-                (snap_iso, it.stable_id, archive_key),
-            )
-        tx.commit()
-    finally:
-        tx.close()
+    # Use `batch` (single round-trip, atomic on the server) instead of
+    # client.transaction(): the HTTP hrana transport doesn't support
+    # interactive transactions, and Turso has retired WebSocket.
+    stmts: list[Statement] = []
+    for it in items:
+        stmts.append(Statement(
+            _UPSERT_ITEM_SQL,
+            _item_row(it, archive_key, first_seen=snap_iso, last_seen=snap_iso),
+        ))
+        stmts.append(Statement(
+            "INSERT OR REPLACE INTO daily_status "
+            "(snapshot_date, stable_id, archive_key, status) "
+            "VALUES (?, ?, ?, 'ongoing')",
+            (snap_iso, it.stable_id, archive_key),
+        ))
+    _batch_chunked(client, stmts)
     return len(items)
 
 
@@ -165,30 +162,29 @@ def record_daily(
     today_iso = today.isoformat()
     today_by_id = {i.stable_id: i for i in items_today}
 
-    tx = client.transaction()
-    try:
-        for sid in new_ids | ongoing_ids:
-            it = today_by_id[sid]
-            # For brand-new items, first_seen = today. For ongoing, leave
-            # first_seen alone (ON CONFLICT DO UPDATE doesn't touch it).
-            tx.execute(
-                _UPSERT_ITEM_SQL,
-                _item_row(it, archive_key, first_seen=today_iso, last_seen=today_iso),
-            )
+    # `batch` instead of `transaction()` — HTTP hrana doesn't support
+    # interactive transactions (Turso has retired WebSocket).
+    stmts: list[Statement] = []
+    for sid in new_ids | ongoing_ids:
+        it = today_by_id[sid]
+        # For brand-new items, first_seen = today. For ongoing, leave
+        # first_seen alone (ON CONFLICT DO UPDATE doesn't touch it).
+        stmts.append(Statement(
+            _UPSERT_ITEM_SQL,
+            _item_row(it, archive_key, first_seen=today_iso, last_seen=today_iso),
+        ))
 
-        status_rows: list[tuple] = []
-        status_rows.extend((today_iso, sid, archive_key, "new")      for sid in new_ids)
-        status_rows.extend((today_iso, sid, archive_key, "ongoing")  for sid in ongoing_ids)
-        status_rows.extend((today_iso, sid, archive_key, "expired")  for sid in expired_ids)
-        for row in status_rows:
-            tx.execute(
-                "INSERT OR REPLACE INTO daily_status "
-                "(snapshot_date, stable_id, archive_key, status) VALUES (?, ?, ?, ?)",
-                row,
-            )
-        tx.commit()
-    finally:
-        tx.close()
+    status_rows: list[tuple] = []
+    status_rows.extend((today_iso, sid, archive_key, "new")      for sid in new_ids)
+    status_rows.extend((today_iso, sid, archive_key, "ongoing")  for sid in ongoing_ids)
+    status_rows.extend((today_iso, sid, archive_key, "expired")  for sid in expired_ids)
+    for row in status_rows:
+        stmts.append(Statement(
+            "INSERT OR REPLACE INTO daily_status "
+            "(snapshot_date, stable_id, archive_key, status) VALUES (?, ?, ?, ?)",
+            row,
+        ))
+    _batch_chunked(client, stmts)
 
 
 def fetch_expired_items(
@@ -225,6 +221,25 @@ def prune(client: libsql_client.ClientSync, today: date) -> tuple[int, int]:
 
 
 # ── internals ───────────────────────────────────────────────────────────────
+
+# Per-batch statement cap. Turso's hrana batch endpoint has a documented soft
+# limit; staying under a few hundred per request keeps each round trip well
+# under the timeout and avoids 'request too large' on big initial seeds
+# (gov-support is 611 items × 2 stmts = 1222 → split into chunks).
+_BATCH_CHUNK = 200
+
+
+def _batch_chunked(client: libsql_client.ClientSync, stmts: list[Statement]) -> None:
+    """Execute `stmts` in size-capped batches. Each chunk is atomic at the
+    server (libsql batch returns all-or-none for that chunk). Across chunks
+    we are NOT transactional — partial failure leaves the DB in a half-written
+    state, but our writes (INSERT OR REPLACE / UPSERT) are idempotent so the
+    next run resolves it."""
+    for start in range(0, len(stmts), _BATCH_CHUNK):
+        chunk = stmts[start : start + _BATCH_CHUNK]
+        if chunk:
+            client.batch(chunk)
+
 
 _UPSERT_ITEM_SQL = (
     "INSERT INTO item ("
