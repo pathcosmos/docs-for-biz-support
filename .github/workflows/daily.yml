@@ -1,0 +1,77 @@
+name: daily
+
+on:
+  schedule:
+    # 23:30 UTC = 08:30 KST next calendar day. KST = UTC + 9, so 08:30 KST = 23:30 UTC.
+    # GH Actions cron is best-effort and often lags 1-15 min during peak load
+    # (top of every hour is worst). 23:30 UTC avoids the hourly spike.
+    - cron: '30 23 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Ignore today sent-marker and re-send'
+        type: boolean
+        default: false
+      only:
+        description: 'Run only this archive key (gov-support / busan-startup / kstartup-biz / kstartup-mentoring / kstartup-global)'
+        type: string
+        default: ''
+      dry_run:
+        description: 'Render but do not send mail or push archives'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # needed to commit state/*.json back to this repo
+
+concurrency:
+  group: daily
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - run: pip install -e .
+
+      - name: orchestrate
+        env:
+          GMAIL_USER:           ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD:   ${{ secrets.GMAIL_APP_PASSWORD }}
+          MAIL_TO:              ${{ secrets.MAIL_TO }}
+          MAIL_CC_GOV_SUPPORT:  ${{ secrets.MAIL_CC_GOV_SUPPORT }}
+          ARCHIVE_PUSH_TOKEN:   ${{ secrets.ARCHIVE_PUSH_TOKEN }}
+          FORCE:                ${{ inputs.force }}
+          ONLY:                 ${{ inputs.only }}
+          DRY_RUN:              ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          args=()
+          [ "${DRY_RUN:-false}" = "true" ] && args+=(--dry-run)
+          [ "${FORCE:-false}"   = "true" ] && args+=(--force)
+          if [ -n "${ONLY:-}" ]; then args+=(--only "$ONLY"); fi
+          python -m src.cli "${args[@]}"
+
+      - name: commit state
+        if: ${{ inputs.dry_run != 'true' }}
+        run: |
+          set -euo pipefail
+          if [ -z "$(git status --porcelain state/ 2>/dev/null)" ]; then
+            echo "no state changes"
+            exit 0
+          fi
+          git -c user.name='pathcosmos-bot' \
+              -c user.email='bot@users.noreply.github.com' \
+              add state/
+          git -c user.name='pathcosmos-bot' \
+              -c user.email='bot@users.noreply.github.com' \
+              commit -m "state: $(date -u +%Y-%m-%d)"
+          git push

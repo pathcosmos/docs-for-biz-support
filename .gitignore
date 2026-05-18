@@ -1,0 +1,22 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+build/
+dist/
+
+# Claude Code local settings (per-machine, not for sharing)
+.claude/settings.local.json
+
+# Local debug artifacts
+preview_*.html
+mails/
+
+# DB is local-dev fallback only; production uses Turso. Never commit the .db.
+state/biz_support.db
+state/biz_support.db-journal
+state/biz_support.db-wal
+state/biz_support.db-shm
+
+# Snapshot JSONs were the pre-DB state shape; commit history only.
+state/*.json
