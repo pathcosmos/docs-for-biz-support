@@ -22,6 +22,7 @@ def register(archive_key: str):
 
 
 # Import side-effects: each adapter module calls @register on import.
+from . import gov_support  # noqa: F401, E402
 from . import kstartup_biz  # noqa: F401, E402
 from . import kstartup_mentoring  # noqa: F401, E402
 from . import kstartup_global  # noqa: F401, E402
