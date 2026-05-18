@@ -144,6 +144,87 @@ def _new_section(items: list[Item], cfg: ArchiveConfig, today: date) -> str:
     )
 
 
+def _expired_section(items: list[Item], today: date) -> str:
+    """🔚 오늘 종료 (N건). Gray/muted styling, no D-N badges (already closed),
+    no category grouping (whatever the items used to be, they're all closed now).
+    Skipped entirely if items is empty."""
+    if not items:
+        return ""
+    cards = "".join(_expired_item_card(i, today) for i in items)
+    return (
+        '<div style="margin-top:28px;">'
+        '<div style="background:#9e9e9e;color:#fff;padding:12px 18px;border-radius:6px 6px 0 0;">'
+        f'<h2 style="margin:0;font-size:18px;">🔚 오늘 종료 ({len(items)}건)</h2>'
+        "</div>"
+        '<div style="border:1px solid #e0e0e0;border-top:none;'
+        'padding:12px 18px;border-radius:0 0 6px 6px;">'
+        f"{cards}"
+        "</div>"
+        "</div>"
+    )
+
+
+def _expired_item_card(item: Item, today: date) -> str:
+    """Item card variant for the expired section: same fields as the live cards
+    but with a gray border, '🔚 신청기간 종료' marker prepended to the period
+    row, and no D-N badge regardless of deadline date."""
+    src = SOURCES.get(item.source_key)
+    source_pill = ""
+    if src:
+        source_pill = (
+            '<div style="margin-bottom:6px;">'
+            '<span style="background:#e8eaed;color:#5f6368;'
+            'padding:2px 8px;border-radius:4px;font-size:11px;margin-right:4px;">'
+            f"{escape(src.display)}</span> </div>"
+        )
+
+    # Build meta table WITHOUT the D-N badge — already closed.
+    rows: list[str] = []
+
+    def row(label: str, value_html: str) -> None:
+        rows.append(
+            f'<tr><td>{label}</td><td style="padding-left:12px;">{value_html}</td></tr>'
+        )
+
+    if item.organizer:
+        row("🏢 주관기관", escape(item.organizer))
+    if item.amount:
+        row("💰 지원금액", escape(item.amount))
+    if item.apply_period:
+        row("📅 신청기간",
+            f'<span style="color:#9e9e9e;">🔚 종료</span> {escape(item.apply_period)}')
+    if item.region:
+        row("🗺️ 지역", escape(item.region))
+    if item.target:
+        row("👥 지원대상", escape(item.target))
+    meta_table = (
+        '<table style="font-size:13px;color:#888;line-height:1.8;">'
+        + "".join(rows) + "</table>"
+        if rows else ""
+    )
+
+    summary_html = ""
+    if item.summary:
+        summary_html = (
+            f'<p style="font-size:13px;color:#999;margin:8px 0 0;">'
+            f"{escape(item.summary)}</p>"
+        )
+
+    return (
+        '<div style="background:#fafafa;border-left:4px solid #9e9e9e;'
+        'padding:14px 18px;margin:12px 0;border-radius:4px;opacity:0.85;">'
+        '<div style="font-size:16px;font-weight:bold;margin-bottom:8px;color:#666;">'
+        '📌 '
+        f'<a href="{escape(item.detail_url)}" '
+        f'style="color:#666;text-decoration:line-through;">{escape(item.title)}</a>'
+        "</div>"
+        f"{source_pill}"
+        f"{meta_table}"
+        f"{summary_html}"
+        "</div>"
+    )
+
+
 def _ongoing_section(items: list[Item], cfg: ArchiveConfig, today: date) -> str:
     if not items:
         return ""
@@ -200,15 +281,19 @@ def render_daily_html(
     items_new: list[Item],
     items_ongoing: list[Item],
     today: date,
+    items_expired: list[Item] | None = None,
     scraper_errors: list[str] | None = None,
     for_email: bool = True,
 ) -> str:
     """Render the daily HTML. `for_email=True` (default) includes the top
     'view in browser' clip-warning banner. The version pushed to the archive
     repo passes `for_email=False` since the reader is already viewing the
-    canonical copy."""
+    canonical copy. `items_expired` defaults to []; only rendered as the
+    `🔚 오늘 종료` section when non-empty."""
+    items_expired = items_expired or []
     new_count = len(items_new)
     ongoing_count = len(items_ongoing)
+    expired_count = len(items_expired)
 
     scraper_warnings = ""
     if scraper_errors:
@@ -234,13 +319,15 @@ def render_daily_html(
         'border-radius:8px 8px 0 0;">'
         f'<h1 style="margin:0;font-size:22px;">{escape(cfg.title)}</h1>'
         f'<p style="margin:6px 0 0;font-size:14px;opacity:0.9;">'
-        f"{today.isoformat()} | 신규 {new_count}건 · 진행중 {ongoing_count}건"
-        "</p></div>"
+        + f"{today.isoformat()} | 신규 {new_count}건 · 진행중 {ongoing_count}건"
+        + (f" · 종료 {expired_count}건" if expired_count else "")
+        + "</p></div>"
         '<div style="border:1px solid #e0e0e0;border-top:none;'
         'padding:20px 24px;border-radius:0 0 8px 8px;">'
         f"{scraper_warnings}"
         f"{_new_section(items_new, cfg, today)}"
         f"{_ongoing_section(items_ongoing, cfg, today)}"
+        f"{_expired_section(items_expired, today)}"
         "</div>"
         f"{render_footer(cfg.key)}"
         "</body></html>"
