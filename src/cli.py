@@ -74,17 +74,55 @@ def _run_archive(cfg: ArchiveConfig, today: datetime, dry_run: bool) -> ArchiveR
     return res
 
 
+def _run_scrape_stage(today: datetime, archive_keys: list[str], dry_run: bool) -> int:
+    """PR1 stub. PR3+ will: per archive, scrape sources → diff against
+    yesterday's Turso daily_status → upsert today's item/daily_status rows.
+    For now, just announce intent so the cron is wired."""
+    print(f"== Scrape stage {today.date().isoformat()} ==")
+    for k in archive_keys:
+        cfg = ARCHIVES[k]
+        print(f"  [STUB] {k}: would scrape {len(cfg.sources)} sources "
+              f"({', '.join(cfg.sources)}) — real scrapers land in PR3+")
+    if dry_run:
+        print("  (dry-run: no DB writes either way; --scrape is itself a no-op now)")
+    return 0
+
+
+def _run_mail_stage(today: datetime, archive_keys: list[str], dry_run: bool,
+                    force: bool) -> int:
+    """PR1 stub. PR3+ will: per archive, read today's daily_status rows from
+    Turso, render the HTML (mail + push variants), push to the 5 archive
+    repos, then send the 5 emails. For now, render the placeholder so the
+    workflow path is exercisable."""
+    report = RunReport(date=today.date())
+    for k in archive_keys:
+        report.results.append(_run_archive(ARCHIVES[k], today, dry_run))
+    print(report.summary())
+    if dry_run:
+        for r in report.results:
+            print(f"  rendered html: {r.archive_key} = {len(r.html)} bytes")
+    return 0 if not report.fatal_errors else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="biz-mailer")
+    stage = p.add_mutually_exclusive_group()
+    stage.add_argument("--scrape", action="store_true",
+                       help="scrape stage only: hit sources, diff, write today rows to DB. "
+                            "Run from scrape.yml at 07:30 KST.")
+    stage.add_argument("--mail", action="store_true",
+                       help="mail stage only: read today rows from DB, render, push 5 archive "
+                            "repos, send 5 emails. Run from mail.yml at 08:30 KST.")
+    stage.add_argument("--seed", action="store_true",
+                       help="bootstrap Turso item/daily_status from current archive-repo HTML")
+
     p.add_argument("--dry-run", action="store_true",
-                   help="render but do not send mail or push archive repos")
+                   help="render but do not send mail / push archive repos / write DB")
     p.add_argument("--only", action="append", default=[],
                    choices=list(ARCHIVE_ORDER),
                    help="run only the named archive(s); may be passed multiple times")
-    p.add_argument("--seed", action="store_true",
-                   help="bootstrap state/*.json from current archive-repo HTML (PR2)")
     p.add_argument("--force", action="store_true",
-                   help="ignore sent-marker and re-send today (PR4)")
+                   help="ignore sent-marker and re-send today (mail stage only)")
     p.add_argument("--date", default=None,
                    help="override 'today' as YYYY-MM-DD (KST); default = now KST")
     args = p.parse_args(argv)
@@ -105,17 +143,18 @@ def main(argv: list[str] | None = None) -> int:
         today = datetime.now(KST)
 
     keys = args.only or list(ARCHIVE_ORDER)
-    report = RunReport(date=today.date())
-    for k in keys:
-        report.results.append(_run_archive(ARCHIVES[k], today, args.dry_run))
 
-    print(report.summary())
+    if args.scrape:
+        return _run_scrape_stage(today, keys, args.dry_run)
+    if args.mail:
+        return _run_mail_stage(today, keys, args.dry_run, args.force)
 
-    if args.dry_run:
-        # In dry-run, also dump HTML lengths so CI can confirm rendering ran.
-        for r in report.results:
-            print(f"  rendered html: {r.archive_key} = {len(r.html)} bytes")
-    return 0 if not report.fatal_errors else 1
+    # No stage selected → run both (manual dev). Sequence matters: scrape
+    # populates today's DB rows that mail consumes.
+    rc = _run_scrape_stage(today, keys, args.dry_run)
+    if rc != 0:
+        return rc
+    return _run_mail_stage(today, keys, args.dry_run, args.force)
 
 
 if __name__ == "__main__":

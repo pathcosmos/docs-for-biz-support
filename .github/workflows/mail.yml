@@ -1,11 +1,12 @@
-name: daily
+name: mail
+
+# 08:30 KST = 23:30 UTC. Reads today's DB rows (filled by scrape.yml at 07:30
+# KST), renders 5 HTML mails, pushes the daily files to the 5 archive repos,
+# then sends 5 emails via Gmail SMTP.
 
 on:
   schedule:
-    # 23:30 UTC = 08:30 KST next calendar day. KST = UTC + 9, so 08:30 KST = 23:30 UTC.
-    # GH Actions cron is best-effort and often lags 1-15 min during peak load
-    # (top of every hour is worst). 23:30 UTC avoids the hourly spike.
-    - cron: '30 23 * * *'
+    - cron: '30 23 * * *'   # 23:30 UTC = 08:30 KST next day
   workflow_dispatch:
     inputs:
       force:
@@ -22,10 +23,12 @@ on:
         default: false
 
 permissions:
-  contents: write   # needed to commit state/*.json back to this repo
+  contents: write   # to commit state/sent-*.marker back to this repo
 
 concurrency:
-  group: daily
+  # Block overlap with scrape.yml — if scrape is still finishing when mail
+  # fires, mail waits. Same-day re-dispatch is also serialized.
+  group: daily-pipeline
   cancel-in-progress: false
 
 jobs:
@@ -49,12 +52,14 @@ jobs:
           MAIL_TO:              ${{ secrets.MAIL_TO }}
           MAIL_CC_GOV_SUPPORT:  ${{ secrets.MAIL_CC_GOV_SUPPORT }}
           ARCHIVE_PUSH_TOKEN:   ${{ secrets.ARCHIVE_PUSH_TOKEN }}
+          TURSO_DATABASE_URL:   ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN:     ${{ secrets.TURSO_AUTH_TOKEN }}
           FORCE:                ${{ inputs.force }}
           ONLY:                 ${{ inputs.only }}
           DRY_RUN:              ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
-          args=()
+          args=(--mail)
           [ "${DRY_RUN:-false}" = "true" ] && args+=(--dry-run)
           [ "${FORCE:-false}"   = "true" ] && args+=(--force)
           if [ -n "${ONLY:-}" ]; then args+=(--only "$ONLY"); fi
