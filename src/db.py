@@ -71,10 +71,17 @@ RETENTION_DAYS = 100
 
 
 def connect() -> libsql_client.ClientSync:
-    """Open a sync libsql client. Production = Turso remote; dev = local SQLite file."""
+    """Open a sync libsql client. Production = Turso remote; dev = local SQLite file.
+
+    Note: libsql-client defaults `libsql://` URLs to WebSocket (`wss://`) but
+    Turso has deprecated WebSocket transport — connections come back as HTTP
+    505. We force HTTP-only by rewriting `libsql://` → `https://` before
+    handing the URL to the client."""
     url = os.environ.get("TURSO_DATABASE_URL")
     token = os.environ.get("TURSO_AUTH_TOKEN")
     if url and token:
+        if url.startswith("libsql://"):
+            url = "https://" + url[len("libsql://"):]
         return libsql_client.create_client_sync(url=url, auth_token=token)
     # Local fallback: ensure the parent dir exists (state/) since libsql-client
     # doesn't create it on its own.
