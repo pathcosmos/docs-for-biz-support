@@ -137,12 +137,20 @@ def _run_mail_stage(today: datetime, archive_keys: list[str], dry_run: bool,
 
     Mail send is still PR7 (currently skipped). Push (PR6) is wired here.
     """
-    from . import db
+    import os
+    from . import db, state
     from .render.daily_html import render_daily_html
     from .push.github_push import push_archive, PushError
+    from .mailer.gmail_smtp import send_html, MailerError
 
     today_d = today.date()
     print(f"== Mail stage {today_d.isoformat()} ==")
+    sent_marker = state.load_sent_marker(today_d)
+    if sent_marker and not force:
+        print(f"  marker found for {today_d.isoformat()}: "
+              f"{list(sent_marker.keys())} already sent — pass --force to re-send")
+
+    mail_to = _csv_env("MAIL_TO")
     report = RunReport(date=today_d)
     client = db.connect()
     try:
@@ -203,10 +211,27 @@ def _run_mail_stage(today: datetime, archive_keys: list[str], dry_run: bool,
 
                 if dry_run:
                     res.skipped_reason = "dry-run"
+                elif k in sent_marker and not force:
+                    res.skipped_reason = f"already sent (marker={sent_marker[k]})"
                 else:
-                    # PR7: send mail via Gmail SMTP. For now, push is the
-                    # last real side-effect.
-                    res.skipped_reason = "PR7: mail send not wired yet"
+                    subject = _build_subject(
+                        cfg.subject_prefix, today_d,
+                        len(new_items), len(ongoing_items), len(expired_items),
+                    )
+                    cc = _csv_env(cfg.cc_env) if cfg.cc_env else []
+                    try:
+                        marker_value = send_html(
+                            subject=subject,
+                            html=res.html,
+                            to=mail_to,
+                            cc=cc,
+                        )
+                        state.mark_sent(today_d, k, marker_value)
+                        res.mail_sent = True
+                        print(f"  [{k} mail] sent to {len(mail_to)} to + {len(cc)} cc")
+                    except MailerError as e:
+                        res.scraper_errors.append(f"mail send failed: {e!s}")
+                        print(f"  [{k} mail] FAILED: {e!s}")
             except Exception as e:  # noqa: BLE001 — per-archive isolation
                 res.scraper_errors.append(f"mail stage failure: {e!r}")
             report.results.append(res)
@@ -230,6 +255,23 @@ def _load_today(client, archive_key: str, today_d):
     ongoing_items = _items_for_status(client, archive_key, today_d, "ongoing")
     expired_items = _items_for_status(client, archive_key, today_d, "expired")
     return new_items, ongoing_items, expired_items
+
+
+def _csv_env(name: str) -> list[str]:
+    """Parse a comma-separated env var into a list of trimmed, non-empty strings."""
+    import os
+    raw = os.environ.get(name, "")
+    return [s.strip() for s in raw.split(",") if s.strip()]
+
+
+def _build_subject(prefix: str, today_d, new_n: int, ongoing_n: int, expired_n: int) -> str:
+    """Compose the mail subject line. Matches the format the user provided as
+    the historical reference: `<prefix> 신규 N건 · 진행중 N건 (YYYY-MM-DD)`,
+    with optional `· 종료 N건` segment when expired_n > 0."""
+    parts = [f"신규 {new_n}건", f"진행중 {ongoing_n}건"]
+    if expired_n:
+        parts.append(f"종료 {expired_n}건")
+    return f"{prefix} {' · '.join(parts)} ({today_d.isoformat()})"
 
 
 def _items_for_status(client, archive_key: str, today_d, status: str):
