@@ -67,12 +67,24 @@ def _synthesize_today(seeded: list[Item], cfg, today: date) -> list[Item]:
 def main() -> int:
     archive_key = "kstartup-biz"
     cfg = ARCHIVES[archive_key]
-    today = date(2026, 5, 18)
-    yesterday = date(2026, 5, 13)   # the seed date
 
     client = db.connect()
     try:
         db.migrate(client)
+        # Find the actual most-recent snapshot for this archive in the DB —
+        # seed populates whatever the archive repo's latest YYYY-MM-DD.html is,
+        # which moves whenever PR6 push lands a fresh day.
+        latest = client.execute(
+            "SELECT MAX(snapshot_date) FROM daily_status WHERE archive_key = ?",
+            (archive_key,),
+        )
+        seed_date_str = latest.rows[0][0] if latest.rows else None
+        if not seed_date_str:
+            print(f"no seed data for {archive_key} — run `python -m src.cli --seed` first")
+            return 1
+        yesterday = date.fromisoformat(seed_date_str)
+        today = date.fromordinal(yesterday.toordinal() + 5)  # +5 days for a clean test horizon
+        print(f"using yesterday={yesterday} (seeded), today={today}")
         seeded = _load_seeded_items(client, archive_key, yesterday)
         print(f"seeded ({yesterday}): {len(seeded)} items for {archive_key}")
 
@@ -127,7 +139,8 @@ def main() -> int:
             existing_content=merged_aj, title=cfg.title, today=today,
             new_count=99, ongoing_count=99, expired_count=99,
         )
-        assert re_run.count('"date": "2026-05-18"') == 1, "same-day duplicate"
+        today_str = f'"date": "{today.isoformat()}"'
+        assert re_run.count(today_str) == 1, f"same-day duplicate on {today.isoformat()}"
         assert '"new_count": 99' in re_run, "re-run did not replace today"
 
         out_aj = out_dir.parent / "archive.json"
