@@ -229,7 +229,11 @@ _UPSERT_ITEM_SQL = (
     "last_seen=excluded.last_seen, "
     "title=excluded.title, "
     "detail_url=excluded.detail_url, "
-    "category=excluded.category, "
+    # COALESCE: preserve an existing non-NULL category. K-Startup adapters
+    # assign default categories ('mentoring' / 'facility') that don't match
+    # the finer legacy categorization (rnd vs mentoring, facility vs global);
+    # we don't want today's scrape to clobber yesterday's better data.
+    "category=COALESCE(item.category, excluded.category), "
     "organizer=excluded.organizer, "
     "amount=excluded.amount, "
     "apply_period=excluded.apply_period, "

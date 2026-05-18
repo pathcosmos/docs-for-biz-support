@@ -75,33 +75,137 @@ def _run_archive(cfg: ArchiveConfig, today: datetime, dry_run: bool) -> ArchiveR
 
 
 def _run_scrape_stage(today: datetime, archive_keys: list[str], dry_run: bool) -> int:
-    """PR1 stub. PR3+ will: per archive, scrape sources → diff against
-    yesterday's Turso daily_status → upsert today's item/daily_status rows.
-    For now, just announce intent so the cron is wired."""
-    print(f"== Scrape stage {today.date().isoformat()} ==")
-    for k in archive_keys:
-        cfg = ARCHIVES[k]
-        print(f"  [STUB] {k}: would scrape {len(cfg.sources)} sources "
-              f"({', '.join(cfg.sources)}) — real scrapers land in PR3+")
-    if dry_run:
-        print("  (dry-run: no DB writes either way; --scrape is itself a no-op now)")
-    return 0
+    """Per archive: invoke the registered adapter to fetch today's items,
+    diff against yesterday's DB snapshot, write the three statuses to
+    daily_status (idempotent on re-run), and prune anything past the 100-day
+    retention. Archives without a registered adapter are skipped with a note —
+    real scrapers land in PR4a/4b/8 incrementally."""
+    from datetime import timedelta
+    from . import db, diff
+    from .adapters import ADAPTERS
+
+    today_d = today.date()
+    yesterday_d = today_d - timedelta(days=1)
+
+    print(f"== Scrape stage {today_d.isoformat()} ==")
+    client = db.connect()
+    try:
+        db.migrate(client)
+        any_failure = False
+        for k in archive_keys:
+            cfg = ARCHIVES[k]
+            adapter = ADAPTERS.get(k)
+            if adapter is None:
+                print(f"  [SKIP] {k}: no adapter registered yet")
+                continue
+            try:
+                items_today = adapter()
+                result = diff.classify(client, cfg, today_d, yesterday_d, items_today)
+                new_ids = {i.stable_id for i in result.new}
+                ongoing_ids = {i.stable_id for i in result.ongoing}
+                expired_ids = {i.stable_id for i in result.expired}
+                if dry_run:
+                    print(f"  [DRY] {k}: scraped {len(items_today)} → "
+                          f"new={len(new_ids)} ongoing={len(ongoing_ids)} "
+                          f"expired={len(expired_ids)}  (no DB write)")
+                else:
+                    db.record_daily(
+                        client, k, today_d, items_today,
+                        new_ids=new_ids, ongoing_ids=ongoing_ids, expired_ids=expired_ids,
+                    )
+                    print(f"  [OK]  {k}: scraped {len(items_today)} → "
+                          f"new={len(new_ids)} ongoing={len(ongoing_ids)} "
+                          f"expired={len(expired_ids)}  (DB updated)")
+            except Exception as e:  # noqa: BLE001 — per-archive isolation
+                any_failure = True
+                print(f"  [FAIL] {k}: {e!r}")
+        # Retention sweep — only when we actually wrote something
+        if not dry_run:
+            d_del, i_del = db.prune(client, today_d)
+            print(f"  prune: removed {d_del} daily_status rows, {i_del} orphan items")
+    finally:
+        client.close()
+    return 1 if any_failure else 0
 
 
 def _run_mail_stage(today: datetime, archive_keys: list[str], dry_run: bool,
                     force: bool) -> int:
-    """PR1 stub. PR3+ will: per archive, read today's daily_status rows from
-    Turso, render the HTML (mail + push variants), push to the 5 archive
-    repos, then send the 5 emails. For now, render the placeholder so the
-    workflow path is exercisable."""
-    report = RunReport(date=today.date())
-    for k in archive_keys:
-        report.results.append(_run_archive(ARCHIVES[k], today, dry_run))
+    """Per archive: read today's daily_status from DB, resolve to full Item
+    rows, render the HTML, then send mail / push to archive repo. Push and
+    send wiring lands in PR6+; for now we render and report counts so the
+    pipeline is exercisable end-to-end against real DB data."""
+    from . import db
+    from .render.daily_html import render_daily_html
+
+    today_d = today.date()
+    print(f"== Mail stage {today_d.isoformat()} ==")
+    report = RunReport(date=today_d)
+    client = db.connect()
+    try:
+        db.migrate(client)
+        for k in archive_keys:
+            cfg = ARCHIVES[k]
+            res = ArchiveResult(archive_key=k)
+            try:
+                new_items, ongoing_items, expired_items = _load_today(client, k, today_d)
+                res.items_new = new_items
+                res.items_ongoing = ongoing_items
+                # If today has no DB rows (scrape didn't run / failed), nothing
+                # to send. Skip rather than mailing an empty digest.
+                if not (new_items or ongoing_items or expired_items):
+                    res.skipped_reason = "no DB rows for today (scrape may have failed)"
+                    report.results.append(res)
+                    continue
+                res.html = render_daily_html(
+                    cfg=cfg,
+                    items_new=new_items,
+                    items_ongoing=ongoing_items,
+                    today=today_d,
+                    items_expired=expired_items,
+                    for_email=True,
+                )
+                if dry_run:
+                    res.skipped_reason = "dry-run"
+                else:
+                    # TODO PR6/7: push to archive repo (push var of HTML),
+                    # then send mail. For now, render is the deliverable.
+                    res.skipped_reason = "PR4a: push+send not wired yet"
+            except Exception as e:  # noqa: BLE001 — per-archive isolation
+                res.scraper_errors.append(f"mail stage failure: {e!r}")
+            report.results.append(res)
+    finally:
+        client.close()
+
     print(report.summary())
     if dry_run:
         for r in report.results:
             print(f"  rendered html: {r.archive_key} = {len(r.html)} bytes")
     return 0 if not report.fatal_errors else 1
+
+
+def _load_today(client, archive_key: str, today_d):
+    """Read today's items grouped by status. `new`/`ongoing` items come from
+    the `item` table (today's scrape upserted them). `expired` items also
+    live there — their last_seen is yesterday because today's scrape didn't
+    re-touch them."""
+    from . import db
+    new_items = _items_for_status(client, archive_key, today_d, "new")
+    ongoing_items = _items_for_status(client, archive_key, today_d, "ongoing")
+    expired_items = _items_for_status(client, archive_key, today_d, "expired")
+    return new_items, ongoing_items, expired_items
+
+
+def _items_for_status(client, archive_key: str, today_d, status: str):
+    from . import db
+    result = client.execute(
+        "SELECT i.stable_id, i.source_key, i.title, i.detail_url, i.category, "
+        "i.organizer, i.amount, i.apply_period, i.deadline, i.region, i.target, "
+        "i.summary, i.badges_json "
+        "FROM daily_status d JOIN item i USING (stable_id) "
+        "WHERE d.archive_key = ? AND d.snapshot_date = ? AND d.status = ?",
+        (archive_key, today_d.isoformat(), status),
+    )
+    return [db._item_from_db_row(r) for r in result.rows]
 
 
 def main(argv: list[str] | None = None) -> int:
