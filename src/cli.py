@@ -130,12 +130,16 @@ def _run_scrape_stage(today: datetime, archive_keys: list[str], dry_run: bool) -
 
 def _run_mail_stage(today: datetime, archive_keys: list[str], dry_run: bool,
                     force: bool) -> int:
-    """Per archive: read today's daily_status from DB, resolve to full Item
-    rows, render the HTML, then send mail / push to archive repo. Push and
-    send wiring lands in PR6+; for now we render and report counts so the
-    pipeline is exercisable end-to-end against real DB data."""
+    """Per archive: read today's daily_status from DB, render the HTML, push
+    the day-file + archive.json + index.html to the archive repo, then send
+    the mail. **Push happens BEFORE mail** so the in-mail "전체 보기" link is
+    live by the time the mail is opened.
+
+    Mail send is still PR7 (currently skipped). Push (PR6) is wired here.
+    """
     from . import db
     from .render.daily_html import render_daily_html
+    from .push.github_push import push_archive, PushError
 
     today_d = today.date()
     print(f"== Mail stage {today_d.isoformat()} ==")
@@ -156,6 +160,17 @@ def _run_mail_stage(today: datetime, archive_keys: list[str], dry_run: bool,
                     res.skipped_reason = "no DB rows for today (scrape may have failed)"
                     report.results.append(res)
                     continue
+
+                # Two renderings: archive copy has no clip-banner, mail has it.
+                # Identical content otherwise.
+                html_archive = render_daily_html(
+                    cfg=cfg,
+                    items_new=new_items,
+                    items_ongoing=ongoing_items,
+                    today=today_d,
+                    items_expired=expired_items,
+                    for_email=False,
+                )
                 res.html = render_daily_html(
                     cfg=cfg,
                     items_new=new_items,
@@ -164,12 +179,34 @@ def _run_mail_stage(today: datetime, archive_keys: list[str], dry_run: bool,
                     items_expired=expired_items,
                     for_email=True,
                 )
+
+                # PUSH FIRST — the email's clip-banner link points at the
+                # archive copy. If push fails, we skip mail to avoid a 404 link.
+                try:
+                    push_result = push_archive(
+                        cfg=cfg, today=today_d,
+                        daily_html_for_archive=html_archive,
+                        new_count=len(new_items),
+                        ongoing_count=len(ongoing_items),
+                        expired_count=len(expired_items),
+                        dry_run=dry_run,
+                    )
+                    res.pushed = push_result.pushed or push_result.note == "dry-run (commit prepared, push skipped)"
+                    print(f"  [{k} push] {push_result.note} "
+                          f"sha={push_result.committed_sha or '-'} "
+                          f"files={push_result.files_changed}")
+                except PushError as e:
+                    res.scraper_errors.append(f"push failed: {e!s}")
+                    res.skipped_reason = "push failed — mail aborted to avoid broken link"
+                    report.results.append(res)
+                    continue
+
                 if dry_run:
                     res.skipped_reason = "dry-run"
                 else:
-                    # TODO PR6/7: push to archive repo (push var of HTML),
-                    # then send mail. For now, render is the deliverable.
-                    res.skipped_reason = "PR4a: push+send not wired yet"
+                    # PR7: send mail via Gmail SMTP. For now, push is the
+                    # last real side-effect.
+                    res.skipped_reason = "PR7: mail send not wired yet"
             except Exception as e:  # noqa: BLE001 — per-archive isolation
                 res.scraper_errors.append(f"mail stage failure: {e!r}")
             report.results.append(res)
