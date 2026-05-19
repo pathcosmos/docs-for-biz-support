@@ -12,6 +12,7 @@ dist/
 preview_*.html
 mails/
 mails-pr3/
+mails-pr-gpu/
 
 # DB is local-dev fallback only; production uses Turso. Never commit the .db.
 state/biz_support.db

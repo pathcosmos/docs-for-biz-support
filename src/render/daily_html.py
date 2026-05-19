@@ -124,6 +124,35 @@ def _category_section(category: Category, items: list[Item], today: date) -> str
     )
 
 
+GPU_AI_BADGE = "🖥️ GPU·AI 인프라"
+
+
+def _gpu_section(all_items: list[Item], today: date) -> str:
+    """🖥️ GPU·AI 인프라 큐레이션 섹션. items 전체(신규+진행중) 중에서 GPU·AI
+    배지가 부여된 것만 골라 메일 본문 맨 위에 별도로 한 번 더 출력한다.
+    같은 item이 신규/진행중 섹션에 한 번 더 등장 — 중복은 의도된 큐레이션."""
+    gpu_items = [i for i in all_items if GPU_AI_BADGE in i.badges]
+    if not gpu_items:
+        return ""
+    # Sort: items with closer deadline first; None last
+    _far = date(9999, 12, 31)
+    gpu_items = sorted(gpu_items, key=lambda i: i.deadline or _far)
+    # Use a distinct purple-magenta tone so GPU section stands apart visually
+    color = "#7b1fa2"
+    cards = "".join(_item_card(i, color, today) for i in gpu_items)
+    return (
+        '<div style="margin-top:28px;">'
+        f'<div style="background:{color};color:#fff;padding:12px 18px;border-radius:6px 6px 0 0;">'
+        f'<h2 style="margin:0;font-size:18px;">{escape(GPU_AI_BADGE)} ({len(gpu_items)}건)</h2>'
+        '</div>'
+        '<div style="border:1px solid #e0e0e0;border-top:none;'
+        'padding:12px 18px;border-radius:0 0 6px 6px;">'
+        f"{cards}"
+        "</div>"
+        "</div>"
+    )
+
+
 def _new_section(items: list[Item], cfg: ArchiveConfig, today: date) -> str:
     if not items:
         return ""
@@ -325,7 +354,10 @@ def render_daily_html(
         '<div style="border:1px solid #e0e0e0;border-top:none;'
         'padding:20px 24px;border-radius:0 0 8px 8px;">'
         f"{scraper_warnings}"
-        f"{_new_section(items_new, cfg, today)}"
+        # GPU·AI 인프라 큐레이션 — 신규 + 진행중 항목 중에서 배지 부여된 것만
+        # 모아 본문 최상단에 한 번 더 출력. 중복 등장은 의도된 우선순위 노출.
+        + _gpu_section(items_new + items_ongoing, today)
+        + f"{_new_section(items_new, cfg, today)}"
         f"{_ongoing_section(items_ongoing, cfg, today)}"
         f"{_expired_section(items_expired, today)}"
         "</div>"

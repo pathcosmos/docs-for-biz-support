@@ -44,6 +44,7 @@ ARCHIVES: dict[str, ArchiveConfig] = {
         sources=(
             "bizinfo", "smes", "ntis", "iris", "smart_factory",
             "cbtp", "djtp", "gbtp", "jntp", "utp", "btp",
+            "nipa",
         ),
         categories=None,
     ),

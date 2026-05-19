@@ -47,7 +47,8 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         region        TEXT,
         target        TEXT,
         summary       TEXT,
-        badges_json   TEXT
+        badges_json   TEXT,
+        extra_json    TEXT
     )
     """,
     """
@@ -95,6 +96,17 @@ def migrate(client: libsql_client.ClientSync) -> None:
     """Idempotent CREATE TABLE / INDEX. Safe to call on every run."""
     for stmt in SCHEMA_STATEMENTS:
         client.execute(stmt)
+    # ALTER TABLE for the extra_json column on pre-existing DBs (CREATE above
+    # already includes it for fresh DBs, but Turso's tables created before
+    # PR-GPU need this addition). Idempotent: ignore "duplicate column" error.
+    try:
+        client.execute("ALTER TABLE item ADD COLUMN extra_json TEXT")
+    except Exception as e:  # noqa: BLE001
+        msg = str(e).lower()
+        if "duplicate" in msg or "already exists" in msg:
+            pass
+        else:
+            raise
 
 
 # ── seed / bootstrap helpers ────────────────────────────────────────────────
@@ -245,8 +257,8 @@ _UPSERT_ITEM_SQL = (
     "INSERT INTO item ("
     "stable_id, archive_key, source_key, first_seen, last_seen, "
     "title, detail_url, category, organizer, amount, apply_period, deadline, "
-    "region, target, summary, badges_json"
-    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+    "region, target, summary, badges_json, extra_json"
+    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
     "ON CONFLICT(stable_id) DO UPDATE SET "
     "last_seen=excluded.last_seen, "
     "title=excluded.title, "
@@ -263,7 +275,15 @@ _UPSERT_ITEM_SQL = (
     "region=excluded.region, "
     "target=excluded.target, "
     "summary=excluded.summary, "
-    "badges_json=excluded.badges_json"
+    # PR-GPU bug fix: bizinfo LIST page lacks 🖥️ GPU/클라우드 badges (those
+    # live only on the DETAIL page). When the daily list scrape ran, badges
+    # came back as () and a vanilla 'badges_json=excluded.badges_json' wiped
+    # out the seed's GPU labels. COALESCE preserves any existing non-NULL
+    # badges; the new value only wins on first insert.
+    "badges_json=COALESCE(item.badges_json, excluded.badges_json), "
+    # Same protection for extra_json — populated on the FIRST detail fetch
+    # for a new stable_id, then never overwritten on subsequent list scrapes.
+    "extra_json=COALESCE(item.extra_json, excluded.extra_json)"
 )
 
 
@@ -286,6 +306,9 @@ def _item_row(it: Item, archive_key: str, *, first_seen: str, last_seen: str) ->
         it.target,
         it.summary,
         json.dumps(list(it.badges), ensure_ascii=False) if it.badges else None,
+        # extra_json: reserved for future use (cached detail-page payload, etc.).
+        # Always NULL today; COALESCE in UPSERT preserves any existing value.
+        None,
     )
 
 

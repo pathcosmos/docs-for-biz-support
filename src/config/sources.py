@@ -64,6 +64,9 @@ SOURCES: dict[str, SourceDef] = {
     "utp":         SourceDef("utp",         "utp",             _numeric_path_tail),
     "btp":         SourceDef("btp",         "부산테크노파크",   _numeric_path_tail),
 
+    # NIPA — added in PR-GPU
+    "nipa": SourceDef("nipa", "NIPA", lambda u: _qs(u, "bsnsDtlsIemNo")),
+
     # busan-startup-archive sources
     "busan_startup": SourceDef("busan_startup", "부산창업지원", _numeric_path_tail),
     "busan_service": SourceDef("busan_service", "부산창업 서비스", _numeric_path_tail),
