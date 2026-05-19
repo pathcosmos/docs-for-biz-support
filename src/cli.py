@@ -263,6 +263,81 @@ def _load_today(client, archive_key: str, today_d):
     return new_items, ongoing_items, expired_items
 
 
+def _run_backfill_details() -> int:
+    """One-shot: walk every existing bizinfo item in the DB, fetch its DETAIL
+    page, run keyword matching, write back enriched badges + summary + region
+    + target + amount. Uses db.backfill_item_enrichment (UPDATE that
+    overwrites badges_json, unlike the daily UPSERT which COALESCEs).
+
+    Expected runtime ≈ 1377 items × ~1 s/fetch = ~25 min. Within the 30 min
+    workflow timeout but tight; prints a progress line every 50 items.
+    """
+    import time
+    from urllib.parse import urlparse, parse_qs
+    import json
+    from . import db
+    from .render.labels import assign_badges
+    from .scrapers.base import HttpClient, ScrapeError
+    from .scrapers.bizinfo import fetch_detail as bizinfo_fetch_detail
+
+    print("== Backfill: bizinfo DETAIL pages + GPU·AI labels ==")
+    client = db.connect()
+    try:
+        db.migrate(client)
+        result = client.execute(
+            "SELECT stable_id, detail_url, title, organizer FROM item "
+            "WHERE archive_key = 'gov-support' AND source_key = 'bizinfo'"
+        )
+        rows = list(result.rows)
+        print(f"  bizinfo items in DB: {len(rows)}")
+
+        ok = fail = labeled = 0
+        t0 = time.time()
+        with HttpClient() as http:
+            for idx, (stable_id, detail_url, title, organizer) in enumerate(rows, 1):
+                # Extract pblanc_id from URL.
+                qs = parse_qs(urlparse(detail_url).query)
+                pblanc_id = (qs.get("pblancId") or [None])[0]
+                if not pblanc_id:
+                    fail += 1
+                    continue
+                try:
+                    det = bizinfo_fetch_detail(http, pblanc_id)
+                except ScrapeError as e:
+                    fail += 1
+                    if fail <= 5:
+                        print(f"  ⚠ detail {pblanc_id}: {e}")
+                    continue
+                badges = assign_badges(
+                    title=title,
+                    summary=det.summary,
+                    hashtags=list(det.hashtags),
+                    organizer=organizer,
+                )
+                badges_json = json.dumps(list(badges), ensure_ascii=False) if badges else None
+                db.backfill_item_enrichment(
+                    client, stable_id,
+                    badges_json=badges_json,
+                    summary=det.summary,
+                    region=det.region,
+                    target=det.target,
+                    amount=det.amount,
+                )
+                ok += 1
+                if badges:
+                    labeled += 1
+                if idx % 50 == 0:
+                    rate = idx / (time.time() - t0)
+                    eta = (len(rows) - idx) / rate
+                    print(f"  progress {idx}/{len(rows)}  ok={ok} fail={fail} "
+                          f"labeled={labeled}  rate={rate:.1f}/s  eta={eta:.0f}s")
+        print(f"\n  DONE  total={len(rows)}  ok={ok}  fail={fail}  labeled={labeled}  "
+              f"elapsed={time.time()-t0:.0f}s")
+    finally:
+        client.close()
+    return 0
+
+
 def _csv_env(name: str) -> list[str]:
     """Parse a comma-separated env var into a list of trimmed, non-empty strings."""
     import os
@@ -304,6 +379,11 @@ def main(argv: list[str] | None = None) -> int:
                             "repos, send 5 emails. Run from mail.yml at 08:30 KST.")
     stage.add_argument("--seed", action="store_true",
                        help="bootstrap Turso item/daily_status from current archive-repo HTML")
+    stage.add_argument("--backfill-details", action="store_true",
+                       help="one-shot: fetch DETAIL page for every existing bizinfo item in "
+                            "the gov-support archive and re-apply GPU·AI keyword labels. "
+                            "Used once after PR-GPU lands to recover badges that prior LIST-"
+                            "only scrapes wiped to NULL.")
 
     p.add_argument("--dry-run", action="store_true",
                    help="render but do not send mail / push archive repos / write DB")
@@ -325,6 +405,9 @@ def main(argv: list[str] | None = None) -> int:
             for w in r.warnings:
                 print(f"    ⚠ {w}")
         return 0
+
+    if args.backfill_details:
+        return _run_backfill_details()
 
     if args.date:
         today = datetime.fromisoformat(args.date).replace(tzinfo=KST)

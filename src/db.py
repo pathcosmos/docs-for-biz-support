@@ -223,6 +223,39 @@ def fetch_expired_items(
     return [_item_from_db_row(r) for r in result.rows]
 
 
+def backfill_item_enrichment(
+    client: libsql_client.ClientSync,
+    stable_id: str,
+    *,
+    badges_json: str | None,
+    summary: str | None = None,
+    region: str | None = None,
+    target: str | None = None,
+    amount: str | None = None,
+) -> None:
+    """One-shot UPDATE used by the backfill flow. Unlike record_daily's
+    UPSERT (which COALESCEs badges_json to PROTECT existing values), this
+    function FORCIBLY overwrites badges_json with whatever the detail-page
+    enrichment produced. The other fields are only set when non-NULL — we
+    don't blank out, e.g., a region that detail-page parsing happened to
+    miss but the LIST page had.
+
+    Used by `cli.py --backfill-details` to retroactively populate GPU·AI
+    badges on items that existed BEFORE PR-GPU shipped (and so were
+    UPSERTed with empty badges, which then got locked in by the COALESCE
+    once PR-GPU landed)."""
+    client.execute(
+        "UPDATE item SET "
+        "badges_json = ?, "
+        "summary = COALESCE(?, summary), "
+        "region = COALESCE(?, region), "
+        "target = COALESCE(?, target), "
+        "amount = COALESCE(?, amount) "
+        "WHERE stable_id = ?",
+        (badges_json, summary, region, target, amount, stable_id),
+    )
+
+
 def prune(client: libsql_client.ClientSync, today: date) -> tuple[int, int]:
     """Delete daily_status rows older than RETENTION_DAYS, then drop item rows
     that no longer have any daily_status row pointing at them.
