@@ -22,3 +22,4 @@ state/biz_support.db-shm
 
 # Snapshot JSONs were the pre-DB state shape; commit history only.
 state/*.json
+mails-pr-curation/

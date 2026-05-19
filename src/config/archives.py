@@ -27,6 +27,9 @@ class ArchiveConfig:
     cc_env: str | None          # name of GH Actions secret holding Cc list; None if no Cc
     sources: tuple[str, ...]    # source_keys this archive's adapter consumes
     categories: tuple[Category, ...] | None  # None = ungrouped (flat 진행중 list)
+    curation_enabled: bool = False  # PR-CURATION: render 10-section curated layout instead of the
+                                    # legacy 🆕/📋/🔚 trio. Only enabled for gov-support (largest
+                                    # archive); other 4 keep their original format until user OKs.
 
 
 ARCHIVES: dict[str, ArchiveConfig] = {
@@ -47,6 +50,7 @@ ARCHIVES: dict[str, ArchiveConfig] = {
             "nipa",
         ),
         categories=None,
+        curation_enabled=True,
     ),
     "busan-startup": ArchiveConfig(
         key="busan-startup",

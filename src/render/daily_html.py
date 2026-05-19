@@ -338,6 +338,24 @@ def render_daily_html(
             "</div>"
         )
 
+    # PR-CURATION: gov-support 같은 curation_enabled 아카이브는 10-섹션 분류
+    # 사용. 그 외는 기존 신규/진행중/종료 구조 + GPU 큐레이션 섹션.
+    if cfg.curation_enabled:
+        body_sections = _render_curation_body(
+            cfg=cfg,
+            items_new=items_new,
+            items_ongoing=items_ongoing,
+            items_expired=items_expired,
+            today=today,
+        )
+    else:
+        body_sections = (
+            _gpu_section(items_new + items_ongoing, today)
+            + _new_section(items_new, cfg, today)
+            + _ongoing_section(items_ongoing, cfg, today)
+            + _expired_section(items_expired, today)
+        )
+
     return (
         "<!DOCTYPE html>"
         '<html><head><meta charset="utf-8"></head>'
@@ -354,13 +372,52 @@ def render_daily_html(
         '<div style="border:1px solid #e0e0e0;border-top:none;'
         'padding:20px 24px;border-radius:0 0 8px 8px;">'
         f"{scraper_warnings}"
-        # GPU·AI 인프라 큐레이션 — 신규 + 진행중 항목 중에서 배지 부여된 것만
-        # 모아 본문 최상단에 한 번 더 출력. 중복 등장은 의도된 우선순위 노출.
-        + _gpu_section(items_new + items_ongoing, today)
-        + f"{_new_section(items_new, cfg, today)}"
-        f"{_ongoing_section(items_ongoing, cfg, today)}"
-        f"{_expired_section(items_expired, today)}"
+        f"{body_sections}"
         "</div>"
         f"{render_footer(cfg.key)}"
         "</body></html>"
+    )
+
+
+def _render_curation_body(
+    *,
+    cfg: ArchiveConfig,
+    items_new: list[Item],
+    items_ongoing: list[Item],
+    items_expired: list[Item],
+    today: date,
+) -> str:
+    """PR-CURATION: 10 prioritized sections, each item in exactly one section.
+    See `src/render/curation.py` for the priority order and selectors."""
+    from .curation import classify_for_curation
+
+    sections = classify_for_curation(
+        items_new=items_new,
+        items_ongoing=items_ongoing,
+        items_expired=items_expired,
+        today=today,
+    )
+    out_parts: list[str] = []
+    for sec in sections:
+        if not sec.items:
+            continue
+        out_parts.append(_render_curation_section(sec, today))
+    return "".join(out_parts)
+
+
+def _render_curation_section(sec, today: date) -> str:
+    """Render one curation section: header + item cards. Uses the section's
+    own header_color/border_color rather than archive-default greys."""
+    cards = "".join(_item_card(i, sec.border_color, today) for i in sec.items)
+    return (
+        '<div style="margin-top:28px;">'
+        f'<div style="background:{sec.header_color};color:#fff;padding:12px 18px;'
+        'border-radius:6px 6px 0 0;">'
+        f'<h2 style="margin:0;font-size:18px;">{escape(sec.title)} ({len(sec.items)}건)</h2>'
+        "</div>"
+        '<div style="border:1px solid #e0e0e0;border-top:none;'
+        'padding:12px 18px;border-radius:0 0 6px 6px;">'
+        f"{cards}"
+        "</div>"
+        "</div>"
     )
