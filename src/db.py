@@ -99,8 +99,13 @@ def migrate(client: libsql_client.ClientSync) -> None:
     # ALTER TABLE for the extra_json column on pre-existing DBs (CREATE above
     # already includes it for fresh DBs, but Turso's tables created before
     # PR-GPU need this addition). Idempotent: ignore "duplicate column" error.
+    # KeyError('result') swallowed too — Turso's hrana response for ALTER on
+    # an already-present column omits the `result` field and libsql-client's
+    # parser raises. The end state is what we want either way.
     try:
         client.execute("ALTER TABLE item ADD COLUMN extra_json TEXT")
+    except KeyError:
+        pass  # already added; hrana parser quirk
     except Exception as e:  # noqa: BLE001
         msg = str(e).lower()
         if "duplicate" in msg or "already exists" in msg:

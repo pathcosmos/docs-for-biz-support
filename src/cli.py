@@ -118,7 +118,13 @@ def _run_scrape_stage(today: datetime, archive_keys: list[str], dry_run: bool) -
                           f"expired={len(expired_ids)}  (DB updated)")
             except Exception as e:  # noqa: BLE001 — per-archive isolation
                 any_failure = True
+                import traceback
                 print(f"  [FAIL] {k}: {e!r}")
+                # Brief traceback (3 frames) so production failures are
+                # diagnosable from the Actions log without re-running locally.
+                tb = traceback.format_exc().splitlines()
+                for line in tb[-12:]:
+                    print(f"    | {line}")
         # Retention sweep — only when we actually wrote something
         if not dry_run:
             d_del, i_del = db.prune(client, today_d)
