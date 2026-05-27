@@ -409,6 +409,12 @@ def _render_curation_section(sec, today: date) -> str:
     """Render one curation section: header + item cards. Uses the section's
     own header_color/border_color rather than archive-default greys."""
     cards = "".join(_item_card(i, sec.border_color, today) for i in sec.items)
+    overflow_notice = ""
+    if sec.overflow_count:
+        overflow_notice = (
+            f'<div style="margin-top:10px;font-size:13px;color:#666;">'
+            f"+{sec.overflow_count}건 더 있음</div>"
+        )
     return (
         '<div style="margin-top:28px;">'
         f'<div style="background:{sec.header_color};color:#fff;padding:12px 18px;'
@@ -418,6 +424,7 @@ def _render_curation_section(sec, today: date) -> str:
         '<div style="border:1px solid #e0e0e0;border-top:none;'
         'padding:12px 18px;border-radius:0 0 6px 6px;">'
         f"{cards}"
+        f"{overflow_notice}"
         "</div>"
         "</div>"
     )
