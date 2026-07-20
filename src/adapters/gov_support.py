@@ -53,11 +53,22 @@ def fetch() -> list[Item]:
     items: list[Item] = []
     with HttpClient() as client:
         # --- 1. bizinfo list ---
+        bizinfo_fallback_items: list[Item] = []
         try:
             bizinfo_raws = fetch_bizinfo(client)
         except ScrapeError as e:
-            logger.warning("bizinfo list failed: %s", e)
+            # bizinfo.go.kr fails intermittently (5xx/timeout from GH Actions'
+            # IP range). Without a fallback, today's scrape would report only
+            # NIPA's ~10 items, so diff.classify() would mark all ~1400 open
+            # bizinfo programs as 🔚종료 today, then 🆕신규 again the day
+            # bizinfo recovers — a false churn cycle with nothing actually
+            # having changed. Re-feed the last successfully-scraped snapshot
+            # instead so those items classify as 진행중 through the outage.
+            logger.warning(
+                "bizinfo list failed: %s — falling back to last cached snapshot", e,
+            )
             bizinfo_raws = []
+            bizinfo_fallback_items = _load_cached_bizinfo_items()
 
         # --- 2. NIPA ---
         try:
@@ -94,11 +105,36 @@ def fetch() -> list[Item]:
 
     # --- 5. Convert raws to Items
     items.extend(_from_bizinfo(r, details_by_id.get(r.pblanc_id)) for r in bizinfo_raws)
+    items.extend(bizinfo_fallback_items)
     items.extend(_from_nipa(r) for r in nipa_raws)
 
     # --- 6. Sort by deadline asc, None last (stable for ties)
     items.sort(key=lambda i: i.deadline or _FAR_FUTURE)
     return items
+
+
+def _load_cached_bizinfo_items() -> list[Item]:
+    """Fallback for when the live bizinfo list fetch fails: return the last
+    successfully-scraped bizinfo snapshot from the DB (whichever day that
+    was — `last_seen` only advances on a day bizinfo actually succeeded, so
+    this is stable across consecutive outage days). SAFE: closes its own
+    connection."""
+    client = db.connect()
+    try:
+        db.migrate(client)
+        result = client.execute(
+            "SELECT stable_id, source_key, title, detail_url, category, "
+            "organizer, amount, apply_period, deadline, region, target, "
+            "summary, badges_json FROM item "
+            "WHERE archive_key = 'gov-support' AND source_key = ? AND last_seen = ("
+            "  SELECT MAX(last_seen) FROM item "
+            "  WHERE archive_key = 'gov-support' AND source_key = ?"
+            ")",
+            (SOURCE_KEY_BIZINFO, SOURCE_KEY_BIZINFO),
+        )
+        return [db._item_from_db_row(r) for r in result.rows]
+    finally:
+        client.close()
 
 
 def _lookup_existing(stable_ids: set[str]) -> set[str]:
