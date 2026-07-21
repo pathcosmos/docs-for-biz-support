@@ -35,6 +35,13 @@ logger = logging.getLogger(__name__)
 K_STARTUP_BASE = "https://www.k-startup.go.kr/web/contents"
 MAX_PAGES = 50  # hard stop in case pagination loops; each archive is well under 1000 items
 
+# Shorter than HttpClient's default 20s — a multi-page walk hitting a hung
+# connection (same failure shape observed for bizinfo: the request never
+# gets a fast rejection, it just times out) wastes 3x the full timeout per
+# page before giving up. See src/scrapers/bizinfo.py's LIST_PAGE_TIMEOUT for
+# the fuller rationale from that investigation.
+LIST_PAGE_TIMEOUT = 10.0
+
 
 @dataclass(frozen=True)
 class KStartupRaw:
@@ -45,6 +52,12 @@ class KStartupRaw:
     summary: str | None
 
 
+@dataclass(frozen=True)
+class KStartupListResult:
+    items: list[KStartupRaw]
+    complete: bool   # False if pagination stopped early due to a page failure
+
+
 VALID_ENDPOINTS = frozenset({
     "webCMRCZN.do", "webRND.do", "webMNT_CNS.do", "webFC_SP_NR.do", "webGLOBAL.do",
 })
@@ -53,9 +66,14 @@ VALID_ENDPOINTS = frozenset({
 def fetch_listings(
     client: HttpClient,
     endpoint: str,
-) -> list[KStartupRaw]:
+) -> KStartupListResult:
     """Walk every page of an endpoint and return the merged list of raw items.
-    Raises ScrapeError if any page fails after retries."""
+
+    A page that fails after retries stops pagination early rather than
+    discarding everything gathered so far — the result is marked
+    `complete=False` so the caller knows not to trust it as "today's full
+    list" (see kstartup_cache.py's docstring for why that distinction
+    matters). Raises ScrapeError only when literally nothing was collected."""
     if endpoint not in VALID_ENDPOINTS:
         raise ValueError(
             f"unknown K-Startup endpoint: {endpoint!r}. "
@@ -67,7 +85,17 @@ def fetch_listings(
     seen_ids: set[str] = set()
 
     for page in range(1, MAX_PAGES + 1):
-        html = client.get(url, params={"page": page})
+        try:
+            html = client.get(url, params={"page": page}, timeout=LIST_PAGE_TIMEOUT)
+        except ScrapeError as e:
+            logger.warning(
+                "kstartup %s page %d failed, stopping pagination early (%d "
+                "items already collected this run): %s", endpoint, page, len(out), e,
+            )
+            if not out:
+                raise
+            return KStartupListResult(items=out, complete=False)
+
         page_items = _parse_list_page(html)
         if not page_items:
             logger.debug("kstartup %s page %d empty — stopping", endpoint, page)
@@ -90,7 +118,7 @@ def fetch_listings(
 
     if not out:
         raise ScrapeError(f"k-startup {endpoint}: 0 items across all pages")
-    return out
+    return KStartupListResult(items=out, complete=True)
 
 
 _ID_RE = re.compile(r"fn_goView\('(\d+)'\)")
