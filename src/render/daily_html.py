@@ -387,8 +387,9 @@ def _render_curation_body(
     items_expired: list[Item],
     today: date,
 ) -> str:
-    """PR-CURATION: 10 prioritized sections, each item in exactly one section.
-    See `src/render/curation.py` for the priority order and selectors."""
+    """PR-CURATION/PR-PRIORITY: 12 prioritized sections, each item in exactly
+    one section. See `src/render/curation.py` for the priority order and
+    selectors."""
     from .curation import classify_for_curation
 
     sections = classify_for_curation(

@@ -1,7 +1,9 @@
 """Keyword → badge label mapping. Lets adapters tag items with curated badges
-based on title / summary / hashtags text. Used primarily for the GPU·AI
-infrastructure curation: `🖥️ GPU·AI 인프라` badge surfaces items whose detail
-text mentions GPU/클라우드/AI infrastructure terms.
+based on title / summary / hashtags text. Used for the GPU·AI infrastructure
+curation (`🖥️ GPU·AI 인프라` badge surfaces items whose detail text mentions
+GPU/클라우드/AI infrastructure terms) and for regional tagging (`🗺️ 부산` /
+`🗺️ 경남` / `🗺️ 경북`, via `matched_regions`/`regional_score`, consumed by
+`curation.py`'s priority-score sections).
 
 The dictionary is intentionally conservative — false positives (a 가족돌봄
 사업 that happens to mention "AI" in a tangential sentence) clutter the GPU
@@ -66,11 +68,12 @@ def is_gpu_ai_infra(text: str | None) -> bool:
     return _PATTERN.search(text) is not None
 
 
-# ── 부산 매처 ──────────────────────────────────────────────────────────────
-# title + organizer 에서 '부산' 또는 부산 산하 구·군 명을 찾는다. Plan 결정에
-# 따라 광역으로 잡되 false positive(예: 부산은행 같은 회사명)는 첫 운영 후
-# 사용자 피드백으로 조정. organizer 가 '부산광역시' 또는 '부산기술창업…'
-# 같은 공식 기관명이면 신뢰도 높음.
+# ── 지역 매처 (부산·경남·경북) ──────────────────────────────────────────────
+# title + organizer 에서 지역명 또는 산하 시·군·구/기관명을 찾는다. Plan 결정에
+# 따라 광역으로 잡되 false positive(예: 부산은행 같은 회사명)는 운영 후
+# 사용자 피드백으로 조정. organizer 가 '부산광역시'/'경상남도'/'경북테크노파크'
+# 같은 공식 기관명이면 신뢰도 높음 — PR-PRIORITY의 `regional_score`가 이
+# organizer-매칭을 title-매칭보다 높게 가중하는 이유.
 
 _BUSAN_TOKENS: tuple[str, ...] = (
     "부산",
@@ -78,7 +81,38 @@ _BUSAN_TOKENS: tuple[str, ...] = (
     "중구·동구", "사상", "남구·수영",  # 부산의 행정구
     "센텀", "B.Cube", "B-cube", "B큐브",  # 부산 창업 시설 명
 )
-_BUSAN_PATTERN = re.compile("|".join(re.escape(t) for t in _BUSAN_TOKENS))
+_GYEONGNAM_TOKENS: tuple[str, ...] = (
+    "경상남도", "경남", "창원", "진주", "김해", "양산", "거제", "통영", "사천",
+    "밀양", "거창", "합천", "함안", "창녕", "고성", "남해", "하동", "산청",
+    "의령", "함양",  # 경남의 시·군
+    "경남지방중소벤처기업청", "경남테크노파크",
+)
+_GYEONGBUK_TOKENS: tuple[str, ...] = (
+    "경상북도", "경북", "포항", "구미", "경주", "안동", "김천", "영주", "영천",
+    "상주", "문경", "경산", "군위", "의성", "청송", "영양", "영덕", "청도",
+    "고령", "성주", "칠곡", "예천", "봉화", "울진", "울릉",  # 경북의 시·군
+    "경북지방중소벤처기업청", "경북테크노파크",
+)
+_BUSAN_PATTERN = re.compile(
+    "|".join(re.escape(t) for t in _BUSAN_TOKENS), flags=re.IGNORECASE,
+)
+_GYEONGNAM_PATTERN = re.compile(
+    "|".join(re.escape(t) for t in _GYEONGNAM_TOKENS), flags=re.IGNORECASE,
+)
+_GYEONGBUK_PATTERN = re.compile(
+    "|".join(re.escape(t) for t in _GYEONGBUK_TOKENS), flags=re.IGNORECASE,
+)
+
+_REGION_PATTERNS: dict[str, re.Pattern[str]] = {
+    "busan": _BUSAN_PATTERN,
+    "gyeongnam": _GYEONGNAM_PATTERN,
+    "gyeongbuk": _GYEONGBUK_PATTERN,
+}
+REGION_BADGES: dict[str, str] = {
+    "busan": "🗺️ 부산",
+    "gyeongnam": "🗺️ 경남",
+    "gyeongbuk": "🗺️ 경북",
+}
 
 
 def is_busan(*texts: str | None) -> bool:
@@ -87,6 +121,44 @@ def is_busan(*texts: str | None) -> bool:
         if t and _BUSAN_PATTERN.search(t):
             return True
     return False
+
+
+def is_gyeongnam(*texts: str | None) -> bool:
+    """텍스트들 중 하나라도 경남 키워드가 매칭되면 True."""
+    for t in texts:
+        if t and _GYEONGNAM_PATTERN.search(t):
+            return True
+    return False
+
+
+def is_gyeongbuk(*texts: str | None) -> bool:
+    """텍스트들 중 하나라도 경북 키워드가 매칭되면 True."""
+    for t in texts:
+        if t and _GYEONGBUK_PATTERN.search(t):
+            return True
+    return False
+
+
+def matched_regions(organizer: str | None, title: str | None) -> tuple[str, ...]:
+    """organizer 또는 title에서 매칭된 지역 키(들)을 안정적인 순서로 반환.
+    ('busan', 'gyeongnam', 'gyeongbuk') 순서 고정, 매칭 없으면 빈 튜플."""
+    out: list[str] = []
+    for key, pattern in _REGION_PATTERNS.items():
+        if (organizer and pattern.search(organizer)) or (title and pattern.search(title)):
+            out.append(key)
+    return tuple(out)
+
+
+def regional_score(organizer: str | None, title: str | None) -> int:
+    """organizer 매칭이 title 매칭보다 신뢰도가 높다 (organizer는 거의 100%
+    채워지는 반면 title 매칭은 우연한 언급일 수 있음) — PR-PRIORITY 가중치.
+    organizer 매칭 시 4점, organizer는 안 맞고 title만 맞으면 2점, 둘 다
+    없으면 0점."""
+    if organizer and any(p.search(organizer) for p in _REGION_PATTERNS.values()):
+        return 4
+    if title and any(p.search(title) for p in _REGION_PATTERNS.values()):
+        return 2
+    return 0
 
 
 # ── 재공고/연장 매처 ─────────────────────────────────────────────────────
@@ -136,4 +208,8 @@ def assign_badges(
     result = list(existing)
     if is_gpu_ai_infra(haystack) and GPU_AI_BADGE not in result:
         result.append(GPU_AI_BADGE)
+    for region_key in matched_regions(organizer, title):
+        badge = REGION_BADGES[region_key]
+        if badge not in result:
+            result.append(badge)
     return tuple(result)
