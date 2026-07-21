@@ -31,6 +31,22 @@ LIST_PATH = "/sii/siia/selectSIIA200View.do"
 DETAIL_PATH = "/sii/siia/selectSIIA200Detail.do"
 MAX_PAGES = 200    # 15/page × 200 = 3000 ceiling — plenty
 
+# The full list walk is ~95-100 sequential requests (1400+ items / 15 per
+# page). Production failures (confirmed via GH Actions log timing analysis —
+# every observed failure takes ~60-65s of pure retry-wait before giving up,
+# consistent with all 3 attempts each hitting the full per-request timeout
+# rather than a fast HTTP error) look like the request hanging until timeout
+# rather than a quick rejection — a shorter per-page timeout means a bad run
+# fails in under half the time without changing the outcome (a hung
+# connection was never going to complete within DEFAULT_TIMEOUT=20s either).
+LIST_PAGE_TIMEOUT = 10.0
+
+
+@dataclass(frozen=True)
+class BizinfoListResult:
+    items: list["BizinfoRaw"]
+    complete: bool   # False if pagination stopped early due to a page failure
+
 
 @dataclass(frozen=True)
 class BizinfoRaw:
@@ -47,13 +63,31 @@ _DATE_RE = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
 _PBLANC_RE = re.compile(r"pblancId=(PBLN_\d+)")
 
 
-def fetch_listings(client: HttpClient) -> list[BizinfoRaw]:
-    """Walk every page of the bizinfo list until empty, return merged items."""
+def fetch_listings(client: HttpClient) -> BizinfoListResult:
+    """Walk every page of the bizinfo list until empty, return merged items.
+
+    A page that fails after retries stops pagination early rather than
+    discarding everything gathered so far — but the result is marked
+    `complete=False` so the caller knows NOT to trust it as "today's full
+    list" (a partial list would otherwise make the diff classifier think
+    every un-scraped item disappeared today — the same false-🔚종료 bug a
+    total failure causes, just triggered by a partial fetch instead).
+    Raises ScrapeError only when literally nothing was collected."""
     url = f"{BASE}{LIST_PATH}"
     out: list[BizinfoRaw] = []
     seen: set[str] = set()
     for page in range(1, MAX_PAGES + 1):
-        html = client.get(url, params={"cpage": page})
+        try:
+            html = client.get(url, params={"cpage": page}, timeout=LIST_PAGE_TIMEOUT)
+        except ScrapeError as e:
+            logger.warning(
+                "bizinfo page %d failed, stopping pagination early (%d items "
+                "already collected this run): %s", page, len(out), e,
+            )
+            if not out:
+                raise
+            return BizinfoListResult(items=out, complete=False)
+
         rows = _parse_list_page(html)
         if not rows:
             logger.debug("bizinfo page %d empty — stopping", page)
@@ -71,7 +105,7 @@ def fetch_listings(client: HttpClient) -> list[BizinfoRaw]:
 
     if not out:
         raise ScrapeError("bizinfo: 0 items across all pages")
-    return out
+    return BizinfoListResult(items=out, complete=True)
 
 
 def _parse_list_page(html: str) -> list[BizinfoRaw]:

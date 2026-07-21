@@ -55,7 +55,7 @@ def fetch() -> list[Item]:
         # --- 1. bizinfo list ---
         bizinfo_fallback_items: list[Item] = []
         try:
-            bizinfo_raws = fetch_bizinfo(client)
+            bizinfo_result = fetch_bizinfo(client)
         except ScrapeError as e:
             # bizinfo.go.kr fails intermittently (5xx/timeout from GH Actions'
             # IP range). Without a fallback, today's scrape would report only
@@ -69,6 +69,22 @@ def fetch() -> list[Item]:
             )
             bizinfo_raws = []
             bizinfo_fallback_items = _load_cached_bizinfo_items()
+        else:
+            if bizinfo_result.complete:
+                bizinfo_raws = bizinfo_result.items
+            else:
+                # Pagination stopped partway through — trusting this as
+                # "today's full list" would make every un-scraped item look
+                # 🔚종료 in the diff, same corruption a total failure causes.
+                # Fall back exactly like a total failure rather than shipping
+                # a partial scrape as if it were complete.
+                logger.warning(
+                    "bizinfo list incomplete (%d of an unknown total collected) "
+                    "— falling back to last cached snapshot instead of a "
+                    "partial scrape", len(bizinfo_result.items),
+                )
+                bizinfo_raws = []
+                bizinfo_fallback_items = _load_cached_bizinfo_items()
 
         # --- 2. NIPA ---
         try:

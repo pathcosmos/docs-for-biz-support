@@ -55,13 +55,16 @@ class HttpClient:
     def __exit__(self, *exc) -> None:
         self.close()
 
-    def get(self, url: str, params: dict | None = None) -> str:
+    def get(self, url: str, params: dict | None = None, timeout: float | None = None) -> str:
         """GET with retry. Returns response text on success; raises ScrapeError
-        after `self.retries` failed attempts."""
+        after `self.retries` failed attempts. `timeout` overrides `self.timeout`
+        for this call only (e.g. a caller doing a very high request-count walk
+        may want to fail faster per-request than a one-off fetch)."""
         last_exc: Exception | None = None
+        req_timeout = self.timeout if timeout is None else timeout
         for attempt in range(self.retries):
             try:
-                r = self._client.get(url, params=params)
+                r = self._client.get(url, params=params, timeout=req_timeout)
                 if r.status_code >= 500:
                     raise httpx.HTTPStatusError(
                         f"{r.status_code} for {url}", request=r.request, response=r
@@ -73,4 +76,11 @@ class HttpClient:
                 if attempt < self.retries - 1:
                     sleep_for = BACKOFF_BASE ** (attempt + 1)
                     time.sleep(sleep_for)
-        raise ScrapeError(f"failed after {self.retries} attempts: {url}") from last_exc
+        # Embed the real underlying error (ConnectTimeout / ReadTimeout / 5xx /
+        # etc.) in the message — without this, production logs only ever show
+        # "failed after 3 attempts" with no way to tell a silent network-level
+        # hang apart from a fast server-side rejection.
+        raise ScrapeError(
+            f"failed after {self.retries} attempts: {url} "
+            f"(last error: {type(last_exc).__name__}: {last_exc})"
+        ) from last_exc
