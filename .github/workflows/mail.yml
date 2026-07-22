@@ -23,6 +23,10 @@ on:
         description: 'Render but do not send mail or push archives'
         type: boolean
         default: false
+      no_cc:
+        description: 'Send without CC (test send to MAIL_TO only)'
+        type: boolean
+        default: false
 
 permissions:
   contents: write   # to commit state/sent-*.marker back to this repo
@@ -59,8 +63,10 @@ jobs:
           FORCE:                ${{ inputs.force }}
           ONLY:                 ${{ inputs.only }}
           DRY_RUN:              ${{ inputs.dry_run }}
+          NO_CC:                ${{ inputs.no_cc }}
         run: |
           set -euo pipefail
+          if [ "${NO_CC:-false}" = "true" ]; then export MAIL_CC_GOV_SUPPORT=""; fi
           args=(--mail)
           [ "${DRY_RUN:-false}" = "true" ] && args+=(--dry-run)
           [ "${FORCE:-false}"   = "true" ] && args+=(--force)
