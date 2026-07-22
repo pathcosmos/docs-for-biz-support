@@ -9,7 +9,7 @@ Each item appears in EXACTLY ONE section: the highest-priority section it
 matches. Priority order (safety-net first):
 
   1. 🔥🎯 마감임박(0~14일) + 우선조건 동시충족
-  2. 🎯 우선조건 충족 — 부산·경남·경북 · 제조·AI·GPU · 중견·중소
+  2. 🎯 우선조건 충족 — 부산·경남·경북 · 제조·AI · 중견·중소
   3. 🔥 마감 임박 (D-5) — 우선조건 미충족
   4. ⚠️ 마감 임박 (D-6 ~ D-14) — 우선조건 미충족
   5. 🆕🖥️ 오늘 신규 — GPU·AI 인프라
@@ -23,13 +23,16 @@ matches. Priority order (safety-net first):
 
 Within each section: deadline ASC, None last.
 
-"우선조건"(`is_priority_match`)은 지역(부산/경남/경북) + 산업(제조/AI/GPU) +
+"우선조건"(`is_priority_match`)은 지역(부산/경남/경북) + 산업(제조/AI) +
 기업규모(중견/중소) 3개 신호를 가중치 점수로 합산해 `PRIORITY_SCORE_THRESHOLD`
 이상이면 성립 — AND도 OR도 아닌 스코어링 방식 (자세한 근거는
 /Users/lanco/.claude/plans/wondrous-sprouting-reef.md 참고). 순수 지역매칭만
 으로는 threshold를 못 넘기 때문에(4점 < 6점), 섹션 6이 그 항목들의 유일한
 전용 자리로 남는다 — 부산 전용이던 옛 섹션을 지우지 않고 3개 지역으로 넓힌
-이유.
+이유. GPU 신호는 우선조건 스코어에 넣지 않는다 — GPU 항목은 전용 섹션
+(🆕🖥️/🖥️, badge 기반)이 따로 잡으므로 여기서 가산하면 이중 우대가 된다.
+산업(0~3) + 규모(0~2) 최대 5점 < threshold 6이라 지역 신호 없이는 우선조건이
+성립하지 않는 것도 의도된 동작.
 """
 
 from __future__ import annotations
@@ -66,7 +69,7 @@ SECTION_MAX_ITEMS: dict[str, int] = {
 SECTION_META: dict[str, tuple[str, str, str]] = {
     # key                 -> (emoji+title,                                        header_color,  card_border_color)
     SEC_URGENT_PRIORITY:  ("🔥🎯 마감임박 + 우선조건 동시충족",                    "#b71c1c",    "#b71c1c"),
-    SEC_PRIORITY_MATCH:   ("🎯 우선조건 충족 — 부산·경남·경북 · 제조·AI·GPU · 중견·중소", "#283593", "#283593"),
+    SEC_PRIORITY_MATCH:   ("🎯 우선조건 충족 — 부산·경남·경북 · 제조·AI · 중견·중소", "#283593", "#283593"),
     SEC_DEADLINE_5:       ("🔥 마감 임박 (D-5)",                                   "#ea4335",    "#ea4335"),
     SEC_DEADLINE_14:      ("⚠️ 마감 임박 (D-6 ~ D-14)",                           "#f57c00",    "#f57c00"),
     SEC_NEW_GPU:          ("🆕🖥️ 오늘 신규 — GPU·AI 인프라",                      "#7b1fa2",    "#7b1fa2"),
@@ -131,12 +134,14 @@ def is_midsme_ai_mfg_gpu_item(item: Item, threshold: int = 3) -> bool:
 
 
 def industry_score(item: Item) -> int:
-    """제조/AI/GPU 연관도. AI +2, GPU +2, 제조 +1 (중복 가산, 최대 5)."""
+    """제조/AI 연관도. AI +2, 제조 +1 (중복 가산, 최대 3).
+
+    GPU 토큰은 가산하지 않는다 — GPU 항목은 전용 섹션(SEC_NEW_GPU/
+    SEC_GPU_ONGOING)이 badge로 따로 잡으므로 우선조건에서까지 우대하지
+    않는다."""
     haystack = _haystack(item)
     score = 0
     if any(t in haystack for t in _MIDSME_AI_TOKENS):
-        score += 2
-    if any(t in haystack for t in _MIDSME_GPU_TOKENS):
         score += 2
     if any(t in haystack for t in _MIDSME_MFG_TOKENS):
         score += 1
@@ -156,7 +161,7 @@ def size_score(item: Item) -> int:
 
 
 def priority_score(item: Item) -> int:
-    """지역(0/2/4) + 산업(0~5) + 기업규모(0/1/2) 합산, 최대 11."""
+    """지역(0/2/4) + 산업(0~3) + 기업규모(0/1/2) 합산, 최대 9."""
     return regional_score(item.organizer, item.title) + industry_score(item) + size_score(item)
 
 

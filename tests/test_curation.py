@@ -36,8 +36,9 @@ def _sections_by_key(**kwargs):
 def test_case_a_new_priority_item_goes_to_priority_section():
     item = _item(
         1,
-        title="중견 제조 AI GPU 지원사업",
-        summary="가속기 스마트공장",
+        title="중견 제조 AI 지원사업",
+        summary="스마트공장",
+        organizer="부산광역시",
         target="중견기업",
     )
     sections = _sections_by_key(items_new=[item], items_ongoing=[], items_expired=[])
@@ -50,6 +51,7 @@ def test_case_b_claimed_prevents_duplicate_reappearance():
         2,
         title="중견 GPU AI 기반 스마트공장 고도화",
         summary="hpc 가속기 도입",
+        organizer="경상남도",
         target="중견기업",
         badges=("🖥️ GPU·AI 인프라",),
     )
@@ -83,7 +85,7 @@ def test_case_c2_urgent_priority_wins_over_deadline5_when_criteria_met():
     item = _item(
         4,
         title="중소 AI 제조 확산",
-        summary="gpu 활용",
+        organizer="부산광역시",
         target="중소기업",
         deadline=TODAY + timedelta(days=2),
     )
@@ -112,13 +114,15 @@ def test_case_c3_urgent_priority_covers_full_0_to_14_day_window():
 def test_case_d_none_deadline_sorted_last_in_section():
     with_deadline = _item(
         6,
-        title="중소 AI GPU 설비 지원",
+        title="중소 AI 설비 지원",
+        organizer="부산광역시",
         target="중소기업",
         deadline=TODAY + timedelta(days=30),
     )
     without_deadline = _item(
         7,
-        title="중견 GPU AI 생산 혁신",
+        title="중견 AI 생산 혁신",
+        organizer="경상남도",
         target="중견기업",
         deadline=None,
     )
@@ -134,8 +138,9 @@ def test_case_e_priority_match_cap_and_overflow_notice():
     items = [
         _item(
             i,
-            title=f"중소 AI 제조 GPU 과제 {i}",
-            summary="llm gpu 스마트공장",
+            title=f"중소 AI 제조 과제 {i}",
+            summary="llm 스마트공장",
+            organizer="부산광역시",
             target="중소기업",
             deadline=TODAY + timedelta(days=20 + i),  # D-14 밖 → Tier2로만 감
         )
@@ -216,6 +221,24 @@ def test_case_i_regional_section_cap_and_overflow_notice():
 
     html = _render_curation_section(regional, TODAY)
     assert "+3건 더 있음" in html
+
+
+def test_case_k_gpu_tokens_do_not_count_toward_priority():
+    """GPU 신호는 우선조건 스코어에서 제외 — GPU 항목은 전용 섹션(badge 기반)이
+    따로 잡는다. 예전 스코어링(GPU +2)이라면 6점(중견2+GPU2+α)으로 우선조건에
+    들어가던 조합이 이제 threshold 미달로 GPU 섹션에만 남는지 확인."""
+    item = _item(
+        11,
+        title="중견 GPU 인프라 지원사업",
+        summary="gpu npu hpc 가속기 고성능컴퓨팅",
+        target="중견기업",
+        badges=("🖥️ GPU·AI 인프라",),
+    )
+    assert curation.priority_score(item) < curation.PRIORITY_SCORE_THRESHOLD
+    sections = _sections_by_key(items_new=[item], items_ongoing=[], items_expired=[])
+    assert sections[SEC_PRIORITY_MATCH].items == []
+    assert sections[SEC_URGENT_PRIORITY].items == []
+    assert [i.stable_id for i in sections[curation.SEC_NEW_GPU].items] == [item.stable_id]
 
 
 def test_case_j_retired_section_keys_are_gone():
