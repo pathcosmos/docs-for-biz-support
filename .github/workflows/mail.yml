@@ -1,12 +1,14 @@
 name: mail
 
-# 08:30 KST = 23:30 UTC. Reads today's DB rows (filled by scrape.yml at 07:30
-# KST), renders 5 HTML mails, pushes the daily files to the 5 archive repos,
-# then sends 5 emails via Gmail SMTP.
+# Nominal 07:40 KST = 22:40 UTC. GitHub cron queue delay is typically
+# 30-90 min, so the run actually starts around 08:10-09:10 KST (target ~08:30).
+# Reads today's DB rows (filled by scrape.yml, nominal 06:10 KST), renders
+# 5 HTML mails, pushes the daily files to the 5 archive repos, then sends
+# 5 emails via Gmail SMTP.
 
 on:
   schedule:
-    - cron: '30 23 * * *'   # 23:30 UTC = 08:30 KST next day
+    - cron: '40 22 * * *'   # 22:40 UTC = 07:40 KST next day (nominal; see delay note above)
   workflow_dispatch:
     inputs:
       force:

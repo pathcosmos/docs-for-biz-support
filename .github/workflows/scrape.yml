@@ -1,13 +1,15 @@
 name: scrape
 
-# 07:30 KST = 22:30 UTC. Scrapes the 10+ Korean gov/startup sources, diffs
-# against yesterday's Turso daily_status, classifies items as new/ongoing/expired,
-# and writes today's rows. Gives the mail workflow (08:30 KST) a fresh DB to
-# read from. 60-min gap absorbs slow / retried source fetches.
+# Nominal 06:10 KST = 21:10 UTC. GitHub cron queue delay is typically
+# 30-90 min, so the run actually starts around 06:40-07:30 KST (target ~07:00).
+# Scrapes the 10+ Korean gov/startup sources, diffs against yesterday's Turso
+# daily_status, classifies items as new/ongoing/expired, and writes today's
+# rows. Gives the mail workflow (nominal 07:40 KST) a fresh DB to read from.
+# 90-min nominal gap absorbs slow / retried source fetches.
 
 on:
   schedule:
-    - cron: '30 22 * * *'   # 22:30 UTC = 07:30 KST next day
+    - cron: '10 21 * * *'   # 21:10 UTC = 06:10 KST next day (nominal; see delay note above)
   workflow_dispatch:
     inputs:
       only:
