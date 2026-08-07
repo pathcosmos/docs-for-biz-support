@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import json
 from html import escape
-from typing import Iterable
 
 from ..config.archives import ArchiveConfig
 

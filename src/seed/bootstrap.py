@@ -17,17 +17,16 @@ import subprocess
 import sys
 import warnings
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup, Tag
 
+from .. import db
 from ..config.archives import ARCHIVE_ORDER, ARCHIVES, ArchiveConfig
 from ..config.categories import Category
 from ..config.sources import SOURCES, SourceDef
 from ..models import Item
-from .. import db
-
 
 # Reverse map: source display label → source_key. Multiple K-Startup sources
 # share the same "K-Startup 사업소개" label, so we resolve those by archive
@@ -285,7 +284,9 @@ def seed_archive(client, cfg: ArchiveConfig) -> SeedResult:
     dates = _list_archive_dates(cfg.repo)
     if not dates:
         warnings.warn(f"{cfg.key}: no YYYY-MM-DD.html in repo {cfg.repo}")
-        return SeedResult(cfg.key, date.today(), [], 0, [f"empty repo {cfg.repo}"])
+        return SeedResult(
+            cfg.key, datetime.now(UTC).date(), [], 0, [f"empty repo {cfg.repo}"]
+        )
     snap = dates[-1]
     html = _fetch_html(cfg.repo, snap)
     items, skipped, warns = parse_archive_html(cfg, html)
@@ -310,7 +311,9 @@ def seed_all() -> dict[str, SeedResult]:
                 )
             except subprocess.CalledProcessError as e:
                 print(f"seed[{k}]: gh api failed: {e}", file=sys.stderr)
-                out[k] = SeedResult(k, date.today(), [], 0, [f"gh api failed: {e}"])
+                out[k] = SeedResult(
+                    k, datetime.now(UTC).date(), [], 0, [f"gh api failed: {e}"]
+                )
     finally:
         client.close()
     return out

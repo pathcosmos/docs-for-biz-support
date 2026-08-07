@@ -7,9 +7,9 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from typing import Self
 
 import httpx
-
 
 DEFAULT_TIMEOUT = 20.0
 DEFAULT_RETRIES = 3
@@ -49,7 +49,7 @@ class HttpClient:
     def close(self) -> None:
         self._client.close()
 
-    def __enter__(self) -> "HttpClient":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *exc) -> None:

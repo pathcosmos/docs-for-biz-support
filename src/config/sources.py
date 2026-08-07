@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 from urllib.parse import parse_qs, urlparse
 
 
@@ -22,7 +22,7 @@ def _qs(url: str, *names: str) -> str | None:
     or None. Multi-value params get the first occurrence."""
     qs = parse_qs(urlparse(url).query)
     for n in names:
-        if n in qs and qs[n]:
+        if qs.get(n):
             return qs[n][0]
     return None
 
@@ -47,15 +47,23 @@ def _kstartup_id(url: str) -> str | None:
 def _numeric_path_tail(url: str) -> str | None:
     """Fallback for sites where the id lives at the end of the URL path
     (e.g. busanstartup.kr/uRent?... or jntp/announcement=NNN)."""
-    return _qs(url, "announcement", "ri_idx", "id")
+    query_id = _qs(url, "announcement", "ri_idx", "id")
+    if query_id:
+        return query_id
+    tail = urlparse(url).path.rstrip("/").rsplit("/", 1)[-1]
+    return tail if tail.isdigit() else None
 
 
 SOURCES: dict[str, SourceDef] = {
-    # gov-support-archive sources
+    # Active government archive sources
     "bizinfo":     SourceDef("bizinfo",     "기업마당",         lambda u: _qs(u, "pblancId")),
-    "smes":        SourceDef("smes",        "중소벤처24",       _smes_id),
-    "ntis":        SourceDef("ntis",        "NTIS 국가R&D",     lambda u: _qs(u, "rndKwd", "rndNo", "id")),
+    "ntis":        SourceDef("ntis",        "NTIS 국가R&D",     lambda u: _qs(u, "roRndUid")),
     "iris":        SourceDef("iris",        "IRIS 범부처R&D",   lambda u: _qs(u, "ancmId")),
+    "nipa":        SourceDef("nipa",        "NIPA",            lambda u: _qs(u, "bsnsDtlsIemNo")),
+
+    # Historical archive labels retained for seed/import compatibility. They
+    # are not active coverage unless listed in ArchiveConfig.sources.
+    "smes":        SourceDef("smes",        "중소벤처24",       _smes_id),
     "smart_factory": SourceDef("smart_factory", "스마트공장",   _smart_factory_id),
     "cbtp":        SourceDef("cbtp",        "cbtp",            _numeric_path_tail),
     "djtp":        SourceDef("djtp",        "djtp",            _numeric_path_tail),
@@ -63,9 +71,6 @@ SOURCES: dict[str, SourceDef] = {
     "jntp":        SourceDef("jntp",        "jntp",            _numeric_path_tail),
     "utp":         SourceDef("utp",         "utp",             _numeric_path_tail),
     "btp":         SourceDef("btp",         "부산테크노파크",   _numeric_path_tail),
-
-    # NIPA — added in PR-GPU
-    "nipa": SourceDef("nipa", "NIPA", lambda u: _qs(u, "bsnsDtlsIemNo")),
 
     # busan-startup-archive sources
     "busan_startup": SourceDef("busan_startup", "부산창업지원", _numeric_path_tail),

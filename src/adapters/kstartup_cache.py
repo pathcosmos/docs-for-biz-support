@@ -1,9 +1,9 @@
-"""Shared DB-fallback helper for the three K-Startup adapters (kstartup-biz/
-mentoring/global). Same rationale as gov_support.py's bizinfo fallback: a
-list fetch that fails or stops partway through must NOT be treated as
-"today's real (small) list" — the diff classifier would mark every
-un-scraped item as 🔚종료, then 🆕신규 again once the source recovers, with
-nothing having actually changed on the source.
+"""Shared completed-snapshot fallback helper for archive adapters.
+
+A list fetch that fails or stops partway through must not be treated as
+today's real (small) list: the diff classifier would mark every un-scraped
+item as ended, then new again once the source recovers, even though the source
+did not actually change.
 
 kstartup-mentoring/global each merge TWO endpoints into one archive, each
 endpoint owning a fixed `category` ('rnd'/'mentoring', 'facility'/'global').
@@ -27,20 +27,29 @@ def load_cached_items(
     client = db.connect()
     try:
         db.migrate(client)
-        where = ["archive_key = ?", "source_key = ?"]
+        where = ["d.archive_key = ?", "i.source_key = ?"]
         params: list[str] = [archive_key, source_key]
         if category is not None:
-            where.append("category = ?")
+            where.append("i.category = ?")
             params.append(category)
         where_sql = " AND ".join(where)
 
         max_params = list(params)
         result = client.execute(
-            "SELECT stable_id, source_key, title, detail_url, category, "
-            "organizer, amount, apply_period, deadline, region, target, "
-            "summary, badges_json FROM item "
-            f"WHERE {where_sql} AND last_seen = ("
-            f"  SELECT MAX(last_seen) FROM item WHERE {where_sql}"
+            "SELECT i.stable_id, i.source_key, i.title, i.detail_url, i.category, "
+            "i.organizer, i.amount, i.apply_period, i.deadline, i.region, i.target, "
+            "i.summary, i.badges_json, i.first_seen, i.active_since "
+            "FROM daily_status d JOIN item i USING (stable_id) "
+            "JOIN scrape_run r ON r.snapshot_date=d.snapshot_date "
+            " AND r.archive_key=d.archive_key "
+            f"WHERE {where_sql} AND d.status IN ('new','ongoing') "
+            "AND r.status='complete' AND d.snapshot_date=("
+            "  SELECT MAX(d.snapshot_date) FROM daily_status d "
+            "  JOIN item i USING (stable_id) "
+            "  JOIN scrape_run r ON r.snapshot_date=d.snapshot_date "
+            "   AND r.archive_key=d.archive_key "
+            f"  WHERE {where_sql} AND d.status IN ('new','ongoing') "
+            "   AND r.status='complete'"
             ")",
             params + max_params,
         )

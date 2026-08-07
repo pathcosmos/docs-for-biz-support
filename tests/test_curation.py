@@ -1,29 +1,29 @@
 from datetime import date, timedelta
 
+from src.config.archives import ARCHIVES
 from src.models import Item
 from src.render import curation
 from src.render.curation import (
     SEC_DEADLINE_5,
     SEC_DEADLINE_14,
+    SEC_NEW_PRIORITY,
     SEC_PRIORITY_MATCH,
     SEC_REGIONAL,
-    SEC_URGENT_PRIORITY,
     SECTION_MAX_ITEMS,
     classify_for_curation,
 )
-from src.render.daily_html import _render_curation_section
-
+from src.render.daily_html import _render_curation_section, render_daily_html
 
 TODAY = date(2026, 5, 27)
 
 
 def _item(idx: int, **kwargs) -> Item:
-    base = dict(
-        stable_id=f"id-{idx}",
-        source_key="bizinfo",
-        title=f"title-{idx}",
-        detail_url=f"https://example.com/{idx}",
-    )
+    base = {
+        "stable_id": f"id-{idx}",
+        "source_key": "bizinfo",
+        "title": f"title-{idx}",
+        "detail_url": f"https://example.com/{idx}",
+    }
     base.update(kwargs)
     return Item(**base)
 
@@ -33,7 +33,7 @@ def _sections_by_key(**kwargs):
     return {s.key: s for s in sections}
 
 
-def test_case_a_new_priority_item_goes_to_priority_section():
+def test_case_a_new_priority_item_goes_to_top_section():
     item = _item(
         1,
         title="중견 제조 AI 지원사업",
@@ -42,7 +42,7 @@ def test_case_a_new_priority_item_goes_to_priority_section():
         target="중견기업",
     )
     sections = _sections_by_key(items_new=[item], items_ongoing=[], items_expired=[])
-    priority = sections[SEC_PRIORITY_MATCH]
+    priority = sections[SEC_NEW_PRIORITY]
     assert [i.stable_id for i in priority.items] == [item.stable_id]
 
 
@@ -59,9 +59,7 @@ def test_case_b_claimed_prevents_duplicate_reappearance():
     containing = [
         key for key, sec in sections.items() if any(i.stable_id == item.stable_id for i in sec.items)
     ]
-    # 우선조건(SEC_PRIORITY_MATCH)과 신규+GPU(SEC_NEW_GPU) 둘 다 매칭되지만
-    # claimed-set 선점으로 먼저 도는 SEC_PRIORITY_MATCH 하나에만 들어간다.
-    assert containing == [SEC_PRIORITY_MATCH]
+    assert containing == [SEC_NEW_PRIORITY]
 
 
 def test_case_c1_deadline5_wins_when_priority_criteria_not_met():
@@ -75,13 +73,11 @@ def test_case_c1_deadline5_wins_when_priority_criteria_not_met():
     assert curation.priority_score(item) < curation.PRIORITY_SCORE_THRESHOLD
     sections = _sections_by_key(items_new=[item], items_ongoing=[], items_expired=[])
     assert [i.stable_id for i in sections[SEC_DEADLINE_5].items] == [item.stable_id]
-    assert sections[SEC_URGENT_PRIORITY].items == []
+    assert sections[SEC_NEW_PRIORITY].items == []
     assert sections[SEC_PRIORITY_MATCH].items == []
 
 
-def test_case_c2_urgent_priority_wins_over_deadline5_when_criteria_met():
-    """우선조건을 넘는 D-5 항목은 이제 SEC_URGENT_PRIORITY로 간다 — 이번
-    재구성의 핵심 동작 변경 (사용자 요청: 마감임박보다 우선조건 상위 배치)."""
+def test_case_c2_new_priority_wins_over_deadline5_when_criteria_met():
     item = _item(
         4,
         title="중소 AI 제조 확산",
@@ -91,23 +87,22 @@ def test_case_c2_urgent_priority_wins_over_deadline5_when_criteria_met():
     )
     assert curation.priority_score(item) >= curation.PRIORITY_SCORE_THRESHOLD
     sections = _sections_by_key(items_new=[item], items_ongoing=[], items_expired=[])
-    assert [i.stable_id for i in sections[SEC_URGENT_PRIORITY].items] == [item.stable_id]
+    assert [i.stable_id for i in sections[SEC_NEW_PRIORITY].items] == [item.stable_id]
     assert sections[SEC_DEADLINE_5].items == []
     assert sections[SEC_PRIORITY_MATCH].items == []
 
 
-def test_case_c3_urgent_priority_covers_full_0_to_14_day_window():
-    """Tier①은 기존 D-5/D-14 두 구간을 하나로 묶는다 — D-6~14 구간의
-    우선조건 매칭 항목도 SEC_DEADLINE_14가 아니라 SEC_URGENT_PRIORITY로."""
+def test_case_c3_priority_moves_to_regular_section_after_seven_days():
     item = _item(
         5,
         title="경남 중견 제조 AI GPU 혁신사업",
         organizer="경상남도",
         deadline=TODAY + timedelta(days=10),
+        active_since=TODAY - timedelta(days=7),
     )
     assert curation.priority_score(item) >= curation.PRIORITY_SCORE_THRESHOLD
-    sections = _sections_by_key(items_new=[item], items_ongoing=[], items_expired=[])
-    assert [i.stable_id for i in sections[SEC_URGENT_PRIORITY].items] == [item.stable_id]
+    sections = _sections_by_key(items_new=[], items_ongoing=[item], items_expired=[])
+    assert [i.stable_id for i in sections[SEC_PRIORITY_MATCH].items] == [item.stable_id]
     assert sections[SEC_DEADLINE_14].items == []
 
 
@@ -118,6 +113,7 @@ def test_case_d_none_deadline_sorted_last_in_section():
         organizer="부산광역시",
         target="중소기업",
         deadline=TODAY + timedelta(days=30),
+        active_since=TODAY - timedelta(days=7),
     )
     without_deadline = _item(
         7,
@@ -125,9 +121,10 @@ def test_case_d_none_deadline_sorted_last_in_section():
         organizer="경상남도",
         target="중견기업",
         deadline=None,
+        active_since=TODAY - timedelta(days=7),
     )
     sections = _sections_by_key(
-        items_new=[without_deadline, with_deadline], items_ongoing=[], items_expired=[]
+        items_new=[], items_ongoing=[without_deadline, with_deadline], items_expired=[]
     )
     priority_ids = [i.stable_id for i in sections[SEC_PRIORITY_MATCH].items]
     assert priority_ids == [with_deadline.stable_id, without_deadline.stable_id]
@@ -143,10 +140,11 @@ def test_case_e_priority_match_cap_and_overflow_notice():
             organizer="부산광역시",
             target="중소기업",
             deadline=TODAY + timedelta(days=20 + i),  # D-14 밖 → Tier2로만 감
+            active_since=TODAY - timedelta(days=7),
         )
         for i in range(100, 100 + cap + 3)
     ]
-    sections = _sections_by_key(items_new=items, items_ongoing=[], items_expired=[])
+    sections = _sections_by_key(items_new=[], items_ongoing=items, items_expired=[])
     priority = sections[SEC_PRIORITY_MATCH]
     assert len(priority.items) == cap
     assert priority.overflow_count == 3
@@ -173,7 +171,7 @@ def test_case_f_organizer_regional_match_weighted_higher_than_title_only():
     sections = _sections_by_key(
         items_new=[organizer_match, title_only_match], items_ongoing=[], items_expired=[]
     )
-    assert [i.stable_id for i in sections[SEC_PRIORITY_MATCH].items] == [organizer_match.stable_id]
+    assert [i.stable_id for i in sections[SEC_NEW_PRIORITY].items] == [organizer_match.stable_id]
 
 
 def test_case_g_pure_regional_match_falls_through_to_regional_section():
@@ -188,11 +186,11 @@ def test_case_g_pure_regional_match_falls_through_to_regional_section():
     assert curation.priority_score(item) < curation.PRIORITY_SCORE_THRESHOLD
     sections = _sections_by_key(items_new=[item], items_ongoing=[], items_expired=[])
     assert [i.stable_id for i in sections[SEC_REGIONAL].items] == [item.stable_id]
-    assert sections[SEC_URGENT_PRIORITY].items == []
+    assert sections[SEC_NEW_PRIORITY].items == []
     assert sections[SEC_PRIORITY_MATCH].items == []
 
 
-def test_case_h_urgent_priority_is_uncapped():
+def test_case_h_new_priority_is_uncapped():
     items = [
         _item(
             i,
@@ -203,9 +201,52 @@ def test_case_h_urgent_priority_is_uncapped():
         for i in range(200, 260)  # SEC_PRIORITY_MATCH cap(50)보다 많은 60건
     ]
     sections = _sections_by_key(items_new=items, items_ongoing=[], items_expired=[])
-    urgent = sections[SEC_URGENT_PRIORITY]
+    urgent = sections[SEC_NEW_PRIORITY]
     assert len(urgent.items) == 60
     assert urgent.overflow_count == 0
+
+
+def test_new_priority_stays_featured_for_six_days_while_ongoing():
+    item = _item(
+        270,
+        title="중소 AI 제조 혁신",
+        organizer="부산광역시",
+        target="중소기업",
+        active_since=TODAY - timedelta(days=6),
+    )
+    sections = _sections_by_key(items_new=[], items_ongoing=[item], items_expired=[])
+    assert [i.stable_id for i in sections[SEC_NEW_PRIORITY].items] == [item.stable_id]
+    assert sections[SEC_PRIORITY_MATCH].items == []
+
+
+def test_archive_mode_does_not_cap_priority_or_regional_sections():
+    cap = SECTION_MAX_ITEMS[SEC_PRIORITY_MATCH]
+    items = [
+        _item(
+            500 + i,
+            title=f"중소 AI 제조 지원 {i}",
+            organizer="부산광역시",
+            active_since=TODAY - timedelta(days=7),
+        )
+        for i in range(cap + 3)
+    ]
+    sections = classify_for_curation(
+        today=TODAY, items_new=[], items_ongoing=items, items_expired=[], apply_caps=False,
+    )
+    priority = {s.key: s for s in sections}[SEC_PRIORITY_MATCH]
+    assert len(priority.items) == cap + 3
+    assert priority.total_count == cap + 3
+    assert priority.overflow_count == 0
+
+    archive_html = render_daily_html(
+        ARCHIVES["gov-support"], [], items, TODAY, for_email=False,
+    )
+    mail_html = render_daily_html(
+        ARCHIVES["gov-support"], [], items, TODAY, for_email=True,
+    )
+    assert archive_html.count("border-left:4px solid") == cap + 3
+    assert mail_html.count("border-left:4px solid") == cap
+    assert f"우선조건 충족 — 부산·경남·경북 · 제조·AI · 중견·중소 ({cap + 3}건)" in mail_html
 
 
 def test_case_i_regional_section_cap_and_overflow_notice():
@@ -237,7 +278,7 @@ def test_case_k_gpu_tokens_do_not_count_toward_priority():
     assert curation.priority_score(item) < curation.PRIORITY_SCORE_THRESHOLD
     sections = _sections_by_key(items_new=[item], items_ongoing=[], items_expired=[])
     assert sections[SEC_PRIORITY_MATCH].items == []
-    assert sections[SEC_URGENT_PRIORITY].items == []
+    assert sections[SEC_NEW_PRIORITY].items == []
     assert [i.stable_id for i in sections[curation.SEC_NEW_GPU].items] == [item.stable_id]
 
 

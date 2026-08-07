@@ -27,9 +27,7 @@ class ArchiveConfig:
     cc_env: str | None          # name of GH Actions secret holding Cc list; None if no Cc
     sources: tuple[str, ...]    # source_keys this archive's adapter consumes
     categories: tuple[Category, ...] | None  # None = ungrouped (flat 진행중 list)
-    curation_enabled: bool = False  # PR-CURATION: render 10-section curated layout instead of the
-                                    # legacy 🆕/📋/🔚 trio. Only enabled for gov-support (largest
-                                    # archive); other 4 keep their original format until user OKs.
+    curation_enabled: bool = False  # Render prioritized sections instead of the flat trio.
 
 
 ARCHIVES: dict[str, ArchiveConfig] = {
@@ -44,11 +42,9 @@ ARCHIVES: dict[str, ArchiveConfig] = {
         subject_prefix="[정부지원]",
         pages_url="https://pathcosmos.github.io/gov-support-archive/",
         cc_env="MAIL_CC_GOV_SUPPORT",
-        sources=(
-            "bizinfo", "smes", "ntis", "iris", "smart_factory",
-            "cbtp", "djtp", "gbtp", "jntp", "utp", "btp",
-            "nipa",
-        ),
+        # Only live adapters belong here. Planned sources remain documented in
+        # config/sources.py but must not be advertised as active coverage.
+        sources=("bizinfo", "nipa", "iris", "ntis"),
         categories=None,
         curation_enabled=True,
     ),

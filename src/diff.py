@@ -1,11 +1,11 @@
-"""Classify today's scraped items against yesterday's DB snapshot.
+"""Classify today's scraped items against the latest completed DB snapshot.
 
 The trichotomy that lands in `daily_status`:
-- new       — today_id NOT in yesterday's (new or ongoing) set
-- ongoing   — today_id IS in yesterday's (new or ongoing) set
-- expired   — yesterday's id NOT in today's scrape (record once, today)
+- new       — today_id is not in the baseline's active set
+- ongoing   — today_id is in the baseline's active set
+- expired   — a baseline id is not in today's scrape (record once, today)
 
-Items that were `expired` yesterday are deliberately excluded from yesterday's
+Items that were `expired` in the baseline are deliberately excluded from its
 set so they don't chain into another `expired` tick today. Re-appearances are
 treated as `new` (simplest); first_seen is preserved on item upsert.
 """
@@ -35,24 +35,29 @@ def classify(
     client,
     cfg: ArchiveConfig,
     today: date,
-    yesterday: date,
+    baseline_date: date | None,
     items_today: list[Item],
 ) -> DiffResult:
-    """Read yesterday's active ids from DB, partition today's scrape into
-    new/ongoing, resolve yesterday-only ids back to full Item rows for the
+    """Read the baseline's active ids, partition today's scrape into
+    new/ongoing, resolve baseline-only ids back to full Item rows for the
     `expired` bucket.
 
     `client` is a live libsql client. Caller is responsible for opening/closing.
     """
     today_by_id = {i.stable_id: i for i in items_today}
-    yesterday_ids = db.get_yesterday_ids(client, cfg.key, yesterday)
+    baseline_ids = (
+        db.get_active_snapshot_ids(client, cfg.key, baseline_date)
+        if baseline_date else set()
+    )
 
-    new_ids = today_by_id.keys() - yesterday_ids
-    ongoing_ids = today_by_id.keys() & yesterday_ids
-    expired_ids = yesterday_ids - today_by_id.keys()
+    new_ids = today_by_id.keys() - baseline_ids
+    ongoing_ids = today_by_id.keys() & baseline_ids
+    expired_ids = baseline_ids - today_by_id.keys()
 
-    new_items = [today_by_id[i] for i in new_ids]
-    ongoing_items = [today_by_id[i] for i in ongoing_ids]
+    # Preserve adapter order (gov-support is deadline-sorted). Set iteration
+    # would make otherwise identical renders reorder unpredictably.
+    new_items = [item for item in items_today if item.stable_id in new_ids]
+    ongoing_items = [item for item in items_today if item.stable_id in ongoing_ids]
 
     # Expired items aren't in today's scrape, so we need full Item rows from
     # the DB (joined via stable_id). `fetch_expired_items` reads daily_status
@@ -78,7 +83,8 @@ def _fetch_items_by_ids(client, ids: set[str]) -> list[Item]:
         result = client.execute(
             "SELECT stable_id, source_key, title, detail_url, category, "
             "organizer, amount, apply_period, deadline, region, target, "
-            "summary, badges_json FROM item WHERE stable_id IN (" + placeholders + ")",
+            "summary, badges_json, first_seen, active_since FROM item "
+            "WHERE stable_id IN (" + placeholders + ")",
             chunk,
         )
         out.extend(db._item_from_db_row(r) for r in result.rows)

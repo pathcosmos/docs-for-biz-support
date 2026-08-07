@@ -1,7 +1,23 @@
+from datetime import date
+
+import pytest
+
 from src import db
 from src.adapters import gov_support
 from src.scrapers.base import ScrapeError
 from src.scrapers.bizinfo import BizinfoListResult, BizinfoRaw
+from src.scrapers.iris import IrisListResult
+from src.scrapers.ntis import NtisListResult
+
+
+@pytest.fixture(autouse=True)
+def _disable_unrelated_live_sources(monkeypatch):
+    monkeypatch.setattr(
+        gov_support, "fetch_iris", lambda client: IrisListResult(items=[], complete=True),
+    )
+    monkeypatch.setattr(
+        gov_support, "fetch_ntis", lambda client: NtisListResult(items=[], complete=True),
+    )
 
 
 def _isolated_db(tmp_path, monkeypatch):
@@ -12,16 +28,13 @@ def _isolated_db(tmp_path, monkeypatch):
 
 
 def _seed_cached_bizinfo_item(client):
-    client.execute(
-        db._UPSERT_ITEM_SQL,
-        db._item_row(
-            db._item_from_db_row((
-                "bizinfo:PBLN_000000000999999", "bizinfo", "[캐시] 이전에 성공한 공고",
-                "https://www.bizinfo.go.kr/x", None, "주관기관", "1천만원",
-                "2026-07-01 ~ 2026-08-01", None, "전국", "중소기업", "요약", None,
-            )),
-            "gov-support", first_seen="2026-07-01", last_seen="2026-07-01",
-        ),
+    item = db._item_from_db_row((
+        "bizinfo:PBLN_000000000999999", "bizinfo", "[캐시] 이전에 성공한 공고",
+        "https://www.bizinfo.go.kr/x", None, "주관기관", "1천만원",
+        "2026-07-01 ~ 2026-08-01", None, "전국", "중소기업", "요약", None,
+    ))
+    db.insert_seed_snapshot(
+        client, "gov-support", date.fromisoformat("2026-07-01"), [item],
     )
 
 
@@ -94,3 +107,31 @@ def test_complete_fetch_is_used_as_is_no_fallback(tmp_path, monkeypatch):
     # fetch is genuinely complete (even though it's a different/smaller set —
     # that's a legitimate diff outcome, not a scrape failure).
     assert "bizinfo:PBLN_000000000999999" not in ids
+
+
+def test_nipa_failure_uses_cache_and_surfaces_warning(tmp_path, monkeypatch):
+    client = _isolated_db(tmp_path, monkeypatch)
+    item = db._item_from_db_row((
+        "nipa:900", "nipa", "[캐시] NIPA 사업", "https://nipa.kr/900",
+        None, "NIPA", None, None, None, None, None, None, None,
+    ))
+    db.insert_seed_snapshot(
+        client, "gov-support", date.fromisoformat("2026-07-01"), [item],
+    )
+    client.close()
+
+    monkeypatch.setattr(
+        gov_support,
+        "fetch_bizinfo",
+        lambda client: BizinfoListResult(items=[], complete=True),
+    )
+    monkeypatch.setattr(
+        gov_support, "fetch_nipa",
+        lambda client: (_ for _ in ()).throw(ScrapeError("nipa outage")),
+    )
+
+    result = gov_support.fetch_result()
+    assert [i.stable_id for i in result.items] == ["nipa:900"]
+    nipa_report = next(r for r in result.source_reports if r.source_key == "nipa")
+    assert nipa_report.status == "fallback"
+    assert "nipa outage" in (nipa_report.warning or "")

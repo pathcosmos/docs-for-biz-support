@@ -8,7 +8,7 @@ import os
 import smtplib
 import ssl
 from email.message import EmailMessage
-
+from email.utils import make_msgid
 
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 465
@@ -44,6 +44,7 @@ def send_html(
     if cc:
         msg["Cc"] = ", ".join(cc)
     msg["Reply-To"] = user
+    msg["Message-ID"] = make_msgid(domain=user.split("@", 1)[-1])
     msg.set_content("This email requires an HTML-capable client.")
     msg.add_alternative(html, subtype="html")
 
@@ -52,10 +53,9 @@ def send_html(
         with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=ctx, timeout=30) as s:
             s.login(user, app_password)
             refused = s.send_message(msg)
-    except smtplib.SMTPException as e:
+    except (smtplib.SMTPException, OSError, TimeoutError, ssl.SSLError) as e:
         raise MailerError(f"SMTP failure: {e}") from e
 
     if refused:
         raise MailerError(f"Refused recipients: {refused}")
-    # No proper message-id returned by smtplib; fabricate a marker.
-    return f"sent:{','.join(to)}"
+    return str(msg["Message-ID"])

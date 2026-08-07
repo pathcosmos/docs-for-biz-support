@@ -1,92 +1,23 @@
-"""CLI entrypoint. PR1 supports --dry-run end-to-end with a stubbed adapter
-that emits a tiny placeholder Item set per archive, so the renderer wiring and
-the GH Actions workflow can be exercised before real scrapers exist."""
+"""Two-stage CLI for scrape persistence and publish/mail delivery."""
 
 from __future__ import annotations
 
 import argparse
-import sys
-from dataclasses import replace
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from .config.archives import ARCHIVE_ORDER, ARCHIVES, ArchiveConfig
-from .models import ArchiveResult, Item, RunReport
-from .render.daily_html import render_daily_html
-
+from .config.archives import ARCHIVE_ORDER, ARCHIVES
+from .models import ArchiveResult, RunReport
 
 KST = ZoneInfo("Asia/Seoul")
 
 
-def _placeholder_items(cfg: ArchiveConfig) -> tuple[list[Item], list[Item]]:
-    """Until real scrapers/adapters land, every archive renders one demo new
-    item and two ongoing items so the layout can be eyeballed."""
-    src = cfg.sources[0]
-    cat = cfg.categories[0].key if cfg.categories else None
-    new = [
-        Item(
-            stable_id="demo-new-1",
-            source_key=src,
-            title="[샘플] 새로 공고된 지원사업",
-            detail_url="https://example.com/announce/1",
-            category=cat,
-            organizer="샘플 주관기관",
-            apply_period="2026-05-18 ~ 2026-05-25",
-            region="전국",
-            target="중소기업",
-            summary="이 항목은 PR1 스켈레톤의 렌더링 검증용 더미입니다.",
-        ),
-    ]
-    ongoing = [
-        Item(
-            stable_id=f"demo-ongoing-{i}",
-            source_key=src,
-            title=f"[샘플] 진행 중 지원사업 {i}",
-            detail_url=f"https://example.com/announce/ongoing-{i}",
-            category=cat,
-            organizer="샘플 주관기관",
-            apply_period="2026-05-01 ~ 2026-06-30",
-            region="전국",
-            target="중소기업",
-        )
-        for i in (1, 2)
-    ]
-    return new, ongoing
-
-
-def _run_archive(cfg: ArchiveConfig, today: datetime, dry_run: bool) -> ArchiveResult:
-    res = ArchiveResult(archive_key=cfg.key)
-    try:
-        new, ongoing = _placeholder_items(cfg)
-        res.items_new = new
-        res.items_ongoing = ongoing
-        res.html = render_daily_html(
-            cfg, new, ongoing, today.date(),
-            scraper_errors=res.scraper_errors or None,
-        )
-        if dry_run:
-            res.skipped_reason = "dry-run"
-            return res
-        # mail + push wiring is added in later PRs
-        res.skipped_reason = "PR1 stub — mail/push not implemented yet"
-    except Exception as e:  # noqa: BLE001 — per-archive isolation
-        res.scraper_errors.append(f"orchestrator failure: {e!r}")
-    return res
-
-
 def _run_scrape_stage(today: datetime, archive_keys: list[str], dry_run: bool) -> int:
-    """Per archive: invoke the registered adapter to fetch today's items,
-    diff against yesterday's DB snapshot, write the three statuses to
-    daily_status (idempotent on re-run), and prune anything past the 100-day
-    retention. Archives without a registered adapter are skipped with a note —
-    real scrapers land in PR4a/4b/8 incrementally."""
-    from datetime import timedelta
+    """Fetch each archive and persist an idempotent, complete daily snapshot."""
     from . import db, diff
     from .adapters import ADAPTERS
 
     today_d = today.date()
-    yesterday_d = today_d - timedelta(days=1)
-
     print(f"== Scrape stage {today_d.isoformat()} ==")
     client = db.connect()
     try:
@@ -98,9 +29,20 @@ def _run_scrape_stage(today: datetime, archive_keys: list[str], dry_run: bool) -
             if adapter is None:
                 print(f"  [SKIP] {k}: no adapter registered yet")
                 continue
+            baseline_d = db.get_latest_completed_snapshot_date(client, k, today_d)
+            if not dry_run:
+                db.start_scrape_run(client, k, today_d, baseline_d)
             try:
-                items_today = adapter()
-                result = diff.classify(client, cfg, today_d, yesterday_d, items_today)
+                adapter_result = adapter()
+                if not adapter_result.usable:
+                    failed_sources = [
+                        r.source_key for r in adapter_result.source_reports if r.status == "failed"
+                    ]
+                    raise RuntimeError(
+                        "sources failed without cache: " + ", ".join(failed_sources)
+                    )
+                items_today = adapter_result.items
+                result = diff.classify(client, cfg, today_d, baseline_d, items_today)
                 new_ids = {i.stable_id for i in result.new}
                 ongoing_ids = {i.stable_id for i in result.ongoing}
                 expired_ids = {i.stable_id for i in result.expired}
@@ -112,12 +54,17 @@ def _run_scrape_stage(today: datetime, archive_keys: list[str], dry_run: bool) -
                     db.record_daily(
                         client, k, today_d, items_today,
                         new_ids=new_ids, ongoing_ids=ongoing_ids, expired_ids=expired_ids,
+                        source_reports=[r.as_dict() for r in adapter_result.source_reports],
                     )
                     print(f"  [OK]  {k}: scraped {len(items_today)} → "
                           f"new={len(new_ids)} ongoing={len(ongoing_ids)} "
                           f"expired={len(expired_ids)}  (DB updated)")
+                for warning in adapter_result.warnings:
+                    print(f"    [WARN] {warning}")
             except Exception as e:  # noqa: BLE001 — per-archive isolation
                 any_failure = True
+                if not dry_run:
+                    db.fail_scrape_run(client, k, today_d, repr(e))
                 import traceback
                 print(f"  [FAIL] {k}: {e!r}")
                 # Brief traceback (3 frames) so production failures are
@@ -141,13 +88,11 @@ def _run_mail_stage(today: datetime, archive_keys: list[str], dry_run: bool,
     the mail. **Push happens BEFORE mail** so the in-mail "전체 보기" link is
     live by the time the mail is opened.
 
-    Mail send is still PR7 (currently skipped). Push (PR6) is wired here.
     """
-    import os
     from . import db, state
+    from .mailer.gmail_smtp import MailerError, send_html
+    from .push.github_push import PushError, push_archive, wait_for_pages
     from .render.daily_html import render_daily_html
-    from .push.github_push import push_archive, PushError
-    from .mailer.gmail_smtp import send_html, MailerError
 
     today_d = today.date()
     print(f"== Mail stage {today_d.isoformat()} ==")
@@ -161,17 +106,50 @@ def _run_mail_stage(today: datetime, archive_keys: list[str], dry_run: bool,
     client = db.connect()
     try:
         db.migrate(client)
+        any_failure = False
         for k in archive_keys:
             cfg = ARCHIVES[k]
             res = ArchiveResult(archive_key=k)
             try:
+                durable_marker = db.get_mail_delivery(client, k, today_d)
+                existing_marker = durable_marker or sent_marker.get(k)
+                if existing_marker and not force and not dry_run:
+                    # Keep both retry guards synchronized. More importantly,
+                    # skip before publishing so an already-sent email's date
+                    # URL cannot silently change without a matching resend.
+                    if not durable_marker:
+                        db.record_mail_delivery(client, k, today_d, existing_marker)
+                    if k not in sent_marker:
+                        state.mark_sent(today_d, k, existing_marker)
+                    res.skipped_reason = f"already sent (marker={existing_marker})"
+                    report.results.append(res)
+                    continue
+                scrape_run = db.get_scrape_run(client, k, today_d)
+                if not scrape_run or scrape_run["status"] != "complete":
+                    state_label = scrape_run["status"] if scrape_run else "missing"
+                    res.skipped_reason = f"scrape snapshot is not complete ({state_label})"
+                    res.scraper_errors.append(
+                        (scrape_run.get("error") or f"scrape_run status={state_label}")
+                        if scrape_run else "no scrape_run"
+                    )
+                    any_failure = True
+                    report.results.append(res)
+                    continue
+
+                source_warnings = [
+                    r.get("warning") for r in scrape_run.get("source_reports", [])
+                    if r.get("warning")
+                ]
+                res.scraper_errors.extend(source_warnings)
                 new_items, ongoing_items, expired_items = _load_today(client, k, today_d)
                 res.items_new = new_items
                 res.items_ongoing = ongoing_items
+                res.items_expired = expired_items
                 # If today has no DB rows (scrape didn't run / failed), nothing
                 # to send. Skip rather than mailing an empty digest.
                 if not (new_items or ongoing_items or expired_items):
                     res.skipped_reason = "no DB rows for today (scrape may have failed)"
+                    any_failure = True
                     report.results.append(res)
                     continue
 
@@ -183,6 +161,7 @@ def _run_mail_stage(today: datetime, archive_keys: list[str], dry_run: bool,
                     items_ongoing=ongoing_items,
                     today=today_d,
                     items_expired=expired_items,
+                    scraper_errors=source_warnings or None,
                     for_email=False,
                 )
                 res.html = render_daily_html(
@@ -191,6 +170,7 @@ def _run_mail_stage(today: datetime, archive_keys: list[str], dry_run: bool,
                     items_ongoing=ongoing_items,
                     today=today_d,
                     items_expired=expired_items,
+                    scraper_errors=source_warnings or None,
                     for_email=True,
                 )
 
@@ -205,20 +185,25 @@ def _run_mail_stage(today: datetime, archive_keys: list[str], dry_run: bool,
                         expired_count=len(expired_items),
                         dry_run=dry_run,
                     )
-                    res.pushed = push_result.pushed or push_result.note == "dry-run (commit prepared, push skipped)"
+                    res.pushed = push_result.pushed or push_result.note in {
+                        "no changes", "dry-run (commit prepared, push skipped)",
+                    }
                     print(f"  [{k} push] {push_result.note} "
                           f"sha={push_result.committed_sha or '-'} "
                           f"files={push_result.files_changed}")
+                    if not dry_run:
+                        published_url = wait_for_pages(cfg, today_d)
+                        res.pages_verified = True
+                        print(f"  [{k} pages] verified {published_url}")
                 except PushError as e:
                     res.scraper_errors.append(f"push failed: {e!s}")
                     res.skipped_reason = "push failed — mail aborted to avoid broken link"
+                    any_failure = True
                     report.results.append(res)
                     continue
 
                 if dry_run:
                     res.skipped_reason = "dry-run"
-                elif k in sent_marker and not force:
-                    res.skipped_reason = f"already sent (marker={sent_marker[k]})"
                 else:
                     subject = _build_subject(
                         cfg.subject_prefix, today_d,
@@ -232,14 +217,17 @@ def _run_mail_stage(today: datetime, archive_keys: list[str], dry_run: bool,
                             to=mail_to,
                             cc=cc,
                         )
+                        db.record_mail_delivery(client, k, today_d, marker_value)
                         state.mark_sent(today_d, k, marker_value)
                         res.mail_sent = True
                         print(f"  [{k} mail] sent to {len(mail_to)} to + {len(cc)} cc")
                     except MailerError as e:
                         res.scraper_errors.append(f"mail send failed: {e!s}")
+                        any_failure = True
                         print(f"  [{k} mail] FAILED: {e!s}")
             except Exception as e:  # noqa: BLE001 — per-archive isolation
                 res.scraper_errors.append(f"mail stage failure: {e!r}")
+                any_failure = True
             report.results.append(res)
     finally:
         client.close()
@@ -248,15 +236,14 @@ def _run_mail_stage(today: datetime, archive_keys: list[str], dry_run: bool,
     if dry_run:
         for r in report.results:
             print(f"  rendered html: {r.archive_key} = {len(r.html)} bytes")
-    return 0 if not report.fatal_errors else 1
+    return 1 if any_failure or report.fatal_errors else 0
 
 
 def _load_today(client, archive_key: str, today_d):
     """Read today's items grouped by status. `new`/`ongoing` items come from
     the `item` table (today's scrape upserted them). `expired` items also
-    live there — their last_seen is yesterday because today's scrape didn't
+    live there — their last_seen is the prior snapshot because today's scrape didn't
     re-touch them."""
-    from . import db
     new_items = _items_for_status(client, archive_key, today_d, "new")
     ongoing_items = _items_for_status(client, archive_key, today_d, "ongoing")
     expired_items = _items_for_status(client, archive_key, today_d, "expired")
@@ -272,9 +259,10 @@ def _run_backfill_details() -> int:
     Expected runtime ≈ 1377 items × ~1 s/fetch = ~25 min. Within the 30 min
     workflow timeout but tight; prints a progress line every 50 items.
     """
-    import time
-    from urllib.parse import urlparse, parse_qs
     import json
+    import time
+    from urllib.parse import parse_qs, urlparse
+
     from . import db
     from .render.labels import assign_badges
     from .scrapers.base import HttpClient, ScrapeError
@@ -360,9 +348,10 @@ def _items_for_status(client, archive_key: str, today_d, status: str):
     result = client.execute(
         "SELECT i.stable_id, i.source_key, i.title, i.detail_url, i.category, "
         "i.organizer, i.amount, i.apply_period, i.deadline, i.region, i.target, "
-        "i.summary, i.badges_json "
+        "i.summary, i.badges_json, i.first_seen, i.active_since "
         "FROM daily_status d JOIN item i USING (stable_id) "
-        "WHERE d.archive_key = ? AND d.snapshot_date = ? AND d.status = ?",
+        "WHERE d.archive_key = ? AND d.snapshot_date = ? AND d.status = ? "
+        "ORDER BY (i.deadline IS NULL), i.deadline, i.stable_id",
         (archive_key, today_d.isoformat(), status),
     )
     return [db._item_from_db_row(r) for r in result.rows]
@@ -373,17 +362,16 @@ def main(argv: list[str] | None = None) -> int:
     stage = p.add_mutually_exclusive_group()
     stage.add_argument("--scrape", action="store_true",
                        help="scrape stage only: hit sources, diff, write today rows to DB. "
-                            "Run from scrape.yml at 07:30 KST.")
+                            "The scheduled run is the scrape job in daily.yml.")
     stage.add_argument("--mail", action="store_true",
                        help="mail stage only: read today rows from DB, render, push 5 archive "
-                            "repos, send 5 emails. Run from mail.yml at 08:30 KST.")
+                            "repos, verify Pages, and send 5 emails.")
     stage.add_argument("--seed", action="store_true",
                        help="bootstrap Turso item/daily_status from current archive-repo HTML")
     stage.add_argument("--backfill-details", action="store_true",
                        help="one-shot: fetch DETAIL page for every existing bizinfo item in "
                             "the gov-support archive and re-apply GPU·AI keyword labels. "
-                            "Used once after PR-GPU lands to recover badges that prior LIST-"
-                            "only scrapes wiped to NULL.")
+                            "Used to recover enrichment for legacy LIST-only rows.")
 
     p.add_argument("--dry-run", action="store_true",
                    help="render but do not send mail / push archive repos / write DB")

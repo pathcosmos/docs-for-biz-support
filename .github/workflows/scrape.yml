@@ -1,15 +1,9 @@
-name: scrape
+name: scrape (manual maintenance)
 
-# Nominal 06:10 KST = 21:10 UTC. GitHub cron queue delay is typically
-# 30-90 min, so the run actually starts around 06:40-07:30 KST (target ~07:00).
-# Scrapes the 10+ Korean gov/startup sources, diffs against yesterday's Turso
-# daily_status, classifies items as new/ongoing/expired, and writes today's
-# rows. Gives the mail workflow (nominal 07:40 KST) a fresh DB to read from.
-# 90-min nominal gap absorbs slow / retried source fetches.
+# Emergency re-scrape and one-shot detail backfill. The daily schedule lives in
+# daily.yml so mail cannot start independently of a successful scrape.
 
 on:
-  schedule:
-    - cron: '10 21 * * *'   # 21:10 UTC = 06:10 KST next day (nominal; see delay note above)
   workflow_dispatch:
     inputs:
       only:
@@ -44,9 +38,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: pip
-
-      - run: pip install -e .
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --frozen --no-dev
 
       - name: orchestrate
         env:
@@ -61,10 +56,10 @@ jobs:
           set -euo pipefail
           if [ "${BACKFILL_DETAILS:-false}" = "true" ]; then
             # One-shot detail backfill — bypasses scrape stage entirely
-            python -m src.cli --backfill-details
+            uv run --frozen python -m src.cli --backfill-details
           else
             args=(--scrape)
             [ "${DRY_RUN:-false}" = "true" ] && args+=(--dry-run)
             if [ -n "${ONLY:-}" ]; then args+=(--only "$ONLY"); fi
-            python -m src.cli "${args[@]}"
+            uv run --frozen python -m src.cli "${args[@]}"
           fi

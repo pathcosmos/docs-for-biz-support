@@ -1,5 +1,7 @@
-"""Renders the daily HTML body for one archive. The output is both the email
-body and the file pushed to <repo>/YYYY-MM-DD.html, byte-identical.
+"""Renders the daily HTML body for one archive.
+
+The email copy includes a browser-view banner and may cap large curated
+sections. The archive copy is uncapped and omits that redundant banner.
 
 The inline-CSS layout matches the existing 2026-05-13.html outputs in the
 five archive repos. Email clients (especially Gmail) don't reliably render
@@ -333,13 +335,13 @@ def render_daily_html(
             '<div style="background:#fff3cd;border-left:4px solid #f57c00;'
             'padding:10px 14px;margin:12px 0;color:#7a4a00;font-size:13px;'
             'border-radius:4px;">'
-            "<strong>일부 소스 스크래핑 실패 — 어제 데이터 사용</strong>"
+            "<strong>일부 소스 수집 실패 — 최근 정상 데이터 사용</strong>"
             f"{warnings}"
             "</div>"
         )
 
-    # PR-CURATION: gov-support 같은 curation_enabled 아카이브는 10-섹션 분류
-    # 사용. 그 외는 기존 신규/진행중/종료 구조 + GPU 큐레이션 섹션.
+    # gov-support uses prioritized curation. Other archives retain the
+    # new/ongoing/expired structure and optional GPU section.
     if cfg.curation_enabled:
         body_sections = _render_curation_body(
             cfg=cfg,
@@ -347,6 +349,7 @@ def render_daily_html(
             items_ongoing=items_ongoing,
             items_expired=items_expired,
             today=today,
+            apply_caps=for_email,
         )
     else:
         body_sections = (
@@ -386,8 +389,9 @@ def _render_curation_body(
     items_ongoing: list[Item],
     items_expired: list[Item],
     today: date,
+    apply_caps: bool,
 ) -> str:
-    """PR-CURATION/PR-PRIORITY: 12 prioritized sections, each item in exactly
+    """Render prioritized sections with each item assigned exactly once.
     one section. See `src/render/curation.py` for the priority order and
     selectors."""
     from .curation import classify_for_curation
@@ -397,6 +401,7 @@ def _render_curation_body(
         items_ongoing=items_ongoing,
         items_expired=items_expired,
         today=today,
+        apply_caps=apply_caps,
     )
     out_parts: list[str] = []
     for sec in sections:
@@ -409,7 +414,11 @@ def _render_curation_body(
 def _render_curation_section(sec, today: date) -> str:
     """Render one curation section: header + item cards. Uses the section's
     own header_color/border_color rather than archive-default greys."""
-    cards = "".join(_item_card(i, sec.border_color, today) for i in sec.items)
+    cards = "".join(
+        _expired_item_card(i, today) if sec.key == "expired"
+        else _item_card(i, sec.border_color, today)
+        for i in sec.items
+    )
     overflow_notice = ""
     if sec.overflow_count:
         overflow_notice = (
@@ -420,7 +429,8 @@ def _render_curation_section(sec, today: date) -> str:
         '<div style="margin-top:28px;">'
         f'<div style="background:{sec.header_color};color:#fff;padding:12px 18px;'
         'border-radius:6px 6px 0 0;">'
-        f'<h2 style="margin:0;font-size:18px;">{escape(sec.title)} ({len(sec.items)}건)</h2>'
+        f'<h2 style="margin:0;font-size:18px;">'
+        f'{escape(sec.title)} ({sec.total_count or len(sec.items)}건)</h2>'
         "</div>"
         '<div style="border:1px solid #e0e0e0;border-top:none;'
         'padding:12px 18px;border-radius:0 0 6px 6px;">'

@@ -24,17 +24,19 @@ from __future__ import annotations
 
 import logging
 import os
-import shutil
 import subprocess
 import tempfile
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
+import httpx
+
 from ..config.archives import ArchiveConfig
 from ..render.archive_json import update_archive_json
 from ..render.index_html import render_index_html
-
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +47,10 @@ BOT_EMAIL = "bot@users.noreply.github.com"
 
 class PushError(RuntimeError):
     """Raised when a push to one archive repo fails. Caller catches per-archive."""
+
+
+class PagesPublishError(PushError):
+    """Raised when the date-specific GitHub Pages copy is not yet available."""
 
 
 @dataclass
@@ -149,6 +155,47 @@ def push_archive(
         result.pushed = True
         result.note = "pushed"
     return result
+
+
+def wait_for_pages(
+    cfg: ArchiveConfig,
+    today: date,
+    *,
+    timeout_seconds: float = 90.0,
+    interval_seconds: float = 5.0,
+    fetcher: Callable[[str], str] | None = None,
+) -> str:
+    """Poll the date-specific Pages URL until it contains today's title/date."""
+    url = f"{cfg.pages_url}{today.isoformat()}.html"
+    fetch = fetcher or _fetch_page
+    deadline = time.monotonic() + timeout_seconds
+    last_error = "not published"
+    while True:
+        try:
+            html = fetch(url)
+            if cfg.title in html and today.isoformat() in html:
+                return url
+            last_error = "HTTP response did not contain the expected title/date"
+        except Exception as exc:  # noqa: BLE001 - retry transient Pages/network failures
+            last_error = f"{type(exc).__name__}: {exc}"
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(interval_seconds, remaining))
+    raise PagesPublishError(f"Pages verification timed out for {url}: {last_error}")
+
+
+def _fetch_page(url: str) -> str:
+    cache_buster = int(time.time())
+    response = httpx.get(
+        url,
+        params={"published": cache_buster},
+        timeout=10.0,
+        follow_redirects=True,
+        headers={"Cache-Control": "no-cache"},
+    )
+    response.raise_for_status()
+    return response.text
 
 
 def _run(

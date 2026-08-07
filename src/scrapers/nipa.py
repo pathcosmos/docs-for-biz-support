@@ -22,7 +22,6 @@ from bs4 import BeautifulSoup, Tag
 
 from .base import HttpClient, ScrapeError
 
-
 logger = logging.getLogger(__name__)
 
 BASE = "https://www.nipa.kr"

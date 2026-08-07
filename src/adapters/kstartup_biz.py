@@ -5,12 +5,11 @@ from __future__ import annotations
 
 import logging
 
-from . import register
-from .kstartup_cache import load_cached_items
-from ..models import Item
+from ..models import AdapterResult, Item, SourceReport
 from ..scrapers.base import HttpClient, ScrapeError
 from ..scrapers.kstartup import KStartupRaw, detail_url, fetch_listings
-
+from . import register
+from .kstartup_cache import load_cached_items
 
 logger = logging.getLogger(__name__)
 
@@ -19,8 +18,12 @@ SOURCE_KEY = "kstartup_biz"
 ARCHIVE_KEY = "kstartup-biz"
 
 
-@register("kstartup-biz")
 def fetch() -> list[Item]:
+    return fetch_result().items
+
+
+@register("kstartup-biz")
+def fetch_result() -> AdapterResult:
     with HttpClient() as client:
         try:
             result = fetch_listings(client, ENDPOINT)
@@ -28,7 +31,15 @@ def fetch() -> list[Item]:
             logger.warning(
                 "kstartup-biz list failed: %s — falling back to last cached snapshot", e,
             )
-            return load_cached_items(ARCHIVE_KEY, SOURCE_KEY)
+            cached = load_cached_items(ARCHIVE_KEY, SOURCE_KEY)
+            return AdapterResult(
+                items=cached,
+                source_reports=(SourceReport(
+                    source_key=SOURCE_KEY,
+                    status="fallback" if cached else "failed",
+                    item_count=len(cached), error=str(e),
+                ),),
+            )
 
         if not result.complete:
             logger.warning(
@@ -36,10 +47,25 @@ def fetch() -> list[Item]:
                 "back to last cached snapshot instead of a partial scrape",
                 len(result.items),
             )
-            return load_cached_items(ARCHIVE_KEY, SOURCE_KEY)
+            cached = load_cached_items(ARCHIVE_KEY, SOURCE_KEY)
+            return AdapterResult(
+                items=cached,
+                source_reports=(SourceReport(
+                    source_key=SOURCE_KEY,
+                    status="fallback" if cached else "failed",
+                    item_count=len(cached),
+                    error=f"incomplete pagination ({len(result.items)} items collected)",
+                ),),
+            )
 
         raws = result.items
-    return [_to_item(r) for r in raws]
+    items = [_to_item(r) for r in raws]
+    return AdapterResult(
+        items=items,
+        source_reports=(SourceReport(
+            source_key=SOURCE_KEY, status="fresh", item_count=len(items),
+        ),),
+    )
 
 
 def _to_item(r: KStartupRaw) -> Item:

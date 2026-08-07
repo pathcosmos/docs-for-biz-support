@@ -1,3 +1,5 @@
+from datetime import date
+
 from src import db
 from src.adapters import kstartup_biz, kstartup_global, kstartup_mentoring
 from src.scrapers.base import ScrapeError
@@ -12,16 +14,13 @@ def _isolated_db(tmp_path, monkeypatch):
 
 
 def _seed_item(client, archive_key, source_key, stable_id, category, title):
-    client.execute(
-        db._UPSERT_ITEM_SQL,
-        db._item_row(
-            db._item_from_db_row((
-                stable_id, source_key, title,
-                f"https://www.k-startup.go.kr/x?id={stable_id}", category,
-                "창업진흥원", None, None, None, None, None, None, None,
-            )),
-            archive_key, first_seen="2026-07-01", last_seen="2026-07-01",
-        ),
+    item = db._item_from_db_row((
+        stable_id, source_key, title,
+        f"https://www.k-startup.go.kr/x?id={stable_id}", category,
+        "창업진흥원", None, None, None, None, None, None, None,
+    ))
+    db.insert_seed_snapshot(
+        client, archive_key, date.fromisoformat("2026-07-01"), [item],
     )
 
 

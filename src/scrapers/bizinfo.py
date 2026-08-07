@@ -23,7 +23,6 @@ from bs4 import BeautifulSoup, Tag
 
 from .base import HttpClient, ScrapeError
 
-
 logger = logging.getLogger(__name__)
 
 BASE = "https://www.bizinfo.go.kr"
@@ -44,7 +43,7 @@ LIST_PAGE_TIMEOUT = 10.0
 
 @dataclass(frozen=True)
 class BizinfoListResult:
-    items: list["BizinfoRaw"]
+    items: list[BizinfoRaw]
     complete: bool   # False if pagination stopped early due to a page failure
 
 

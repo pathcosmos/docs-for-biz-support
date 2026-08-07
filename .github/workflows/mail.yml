@@ -1,14 +1,9 @@
-name: mail
+name: mail (manual recovery)
 
-# Nominal 07:40 KST = 22:40 UTC. GitHub cron queue delay is typically
-# 30-90 min, so the run actually starts around 08:10-09:10 KST (target ~08:30).
-# Reads today's DB rows (filled by scrape.yml, nominal 06:10 KST), renders
-# 5 HTML mails, pushes the daily files to the 5 archive repos, then sends
-# 5 emails via Gmail SMTP.
+# Emergency mail retry for an already-complete daily snapshot. The regular
+# schedule lives in daily.yml and depends directly on its scrape job.
 
 on:
-  schedule:
-    - cron: '40 22 * * *'   # 22:40 UTC = 07:40 KST next day (nominal; see delay note above)
   workflow_dispatch:
     inputs:
       force:
@@ -43,13 +38,16 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: pip
-
-      - run: pip install -e .
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --frozen --no-dev
 
       - name: orchestrate
         env:
@@ -71,10 +69,10 @@ jobs:
           [ "${DRY_RUN:-false}" = "true" ] && args+=(--dry-run)
           [ "${FORCE:-false}"   = "true" ] && args+=(--force)
           if [ -n "${ONLY:-}" ]; then args+=(--only "$ONLY"); fi
-          python -m src.cli "${args[@]}"
+          uv run --frozen python -m src.cli "${args[@]}"
 
       - name: commit state
-        if: ${{ inputs.dry_run != 'true' }}
+        if: ${{ inputs.dry_run != true }}
         run: |
           set -euo pipefail
           if [ -z "$(git status --porcelain state/ 2>/dev/null)" ]; then
@@ -87,4 +85,5 @@ jobs:
           git -c user.name='pathcosmos-bot' \
               -c user.email='bot@users.noreply.github.com' \
               commit -m "state: $(date -u +%Y-%m-%d)"
-          git push
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"

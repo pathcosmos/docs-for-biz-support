@@ -1,0 +1,108 @@
+name: daily pipeline
+
+on:
+  schedule:
+    - cron: '10 21 * * *' # 06:10 KST; mail starts only after every scrape succeeds
+  workflow_dispatch:
+    inputs:
+      only:
+        description: 'Run only one archive key (empty = all)'
+        type: string
+        default: ''
+      dry_run:
+        description: 'Scrape without DB writes; skip push and mail'
+        type: boolean
+        default: false
+      force:
+        description: 'Ignore durable sent marker and re-send'
+        type: boolean
+        default: false
+      no_cc:
+        description: 'Send without government-support CC recipients'
+        type: boolean
+        default: false
+
+concurrency:
+  group: daily-pipeline
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --frozen --no-dev
+      - name: scrape and persist complete snapshots
+        env:
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+          ONLY: ${{ inputs.only }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          args=(--scrape)
+          [ "${DRY_RUN:-false}" = "true" ] && args+=(--dry-run)
+          if [ -n "${ONLY:-}" ]; then args+=(--only "$ONLY"); fi
+          uv run --frozen python -m src.cli "${args[@]}"
+
+  mail:
+    needs: scrape
+    if: ${{ needs.scrape.result == 'success' && inputs.dry_run != true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --frozen --no-dev
+      - name: publish, verify Pages, and send
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+          MAIL_CC_GOV_SUPPORT: ${{ secrets.MAIL_CC_GOV_SUPPORT }}
+          ARCHIVE_PUSH_TOKEN: ${{ secrets.ARCHIVE_PUSH_TOKEN }}
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+          ONLY: ${{ inputs.only }}
+          FORCE: ${{ inputs.force }}
+          NO_CC: ${{ inputs.no_cc }}
+        run: |
+          set -euo pipefail
+          if [ "${NO_CC:-false}" = "true" ]; then export MAIL_CC_GOV_SUPPORT=""; fi
+          args=(--mail)
+          [ "${FORCE:-false}" = "true" ] && args+=(--force)
+          if [ -n "${ONLY:-}" ]; then args+=(--only "$ONLY"); fi
+          uv run --frozen python -m src.cli "${args[@]}"
+      - name: commit auditable sent markers
+        run: |
+          set -euo pipefail
+          if [ -z "$(git status --porcelain state/ 2>/dev/null)" ]; then
+            echo "no state changes"
+            exit 0
+          fi
+          git -c user.name='pathcosmos-bot' \
+              -c user.email='bot@users.noreply.github.com' \
+              add state/
+          git -c user.name='pathcosmos-bot' \
+              -c user.email='bot@users.noreply.github.com' \
+              commit -m "state: $(date -u +%Y-%m-%d)"
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"

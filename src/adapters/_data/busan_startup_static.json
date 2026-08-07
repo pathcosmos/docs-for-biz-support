@@ -1,6 +1,6 @@
 {
   "source": "seeded from busan-startup-archive/2026-05-13.html",
-  "note": "동적 스크래퍼 미구현 — 정적 데이터로 archive 사이클 유지. PR8 등에서 real scraper로 교체 예정.",
+  "note": "지원사업은 실시간 API로 수집. 이 파일의 지원사업 행은 최초 장애 폴백, 서비스 행은 장기 운영시설 목록으로 사용.",
   "items": [
     {
       "stable_id": "busan_service:212",

@@ -1,19 +1,19 @@
 """Adapter for the gov-support archive — multi-source aggregator.
 
-Current sources (PR-GPU as of 2026-05-19):
-- bizinfo (기업마당) — main, ~1377 items/day from the LIST page. NEW items
+Current sources:
+- bizinfo (기업마당) — main source. NEW items
   trigger an additional DETAIL page fetch to enrich summary + hashtags + the
   `🖥️ GPU·AI 인프라` badge via keyword matching.
-- NIPA (정보통신산업진흥원) — ~24 AI/digital programs. All get the GPU·AI
+- NIPA (정보통신산업진흥원) — AI/digital programs. All get the GPU·AI
   badge auto-applied (entire site is AI-focused).
-
-Deferred (PR8): IRIS, NTIS, smes, smart-factory, 6 technoparks.
+- IRIS (범부처통합연구지원시스템) — currently open R&D announcements.
+- NTIS (국가과학기술지식정보서비스) — upcoming/open R&D announcements.
 
 Sorting: items by deadline ascending; items with no deadline last. Most
 time-sensitive announcements at the top of the mail body — survives Gmail's
 ~102 KB inbox-view clip.
 
-Detail-fetch policy: only NEW items (stable_id not in yesterday's DB) get
+Detail-fetch policy: only first-seen items (stable_id not yet in the DB) get
 the DETAIL fetch. Items already in DB rely on the DB's previously-cached
 extras (which COALESCE preserves on re-upsert). The fetch budget is ~20-50
 new items/day × 1 s = ~30 s — safe within the 30 min cron timeout.
@@ -22,35 +22,68 @@ new items/day × 1 s = ~30 s — safe within the 30 min cron timeout.
 from __future__ import annotations
 
 import logging
-from datetime import date, timedelta
+from datetime import date
 
-from . import register
 from .. import db
-from ..config.archives import ARCHIVES
-from ..models import Item
-from ..render.labels import assign_badges, GPU_AI_BADGE
+from ..models import AdapterResult, Item, SourceReport
+from ..render.labels import GPU_AI_BADGE, assign_badges
 from ..scrapers.base import HttpClient, ScrapeError
 from ..scrapers.bizinfo import (
-    BizinfoDetail, BizinfoRaw, detail_url as bizinfo_detail_url,
+    BizinfoDetail,
+    BizinfoRaw,
+)
+from ..scrapers.bizinfo import (
+    detail_url as bizinfo_detail_url,
+)
+from ..scrapers.bizinfo import (
     fetch_detail as bizinfo_fetch_detail,
+)
+from ..scrapers.bizinfo import (
     fetch_listings as fetch_bizinfo,
 )
-from ..scrapers.nipa import NipaRaw, detail_url as nipa_detail_url, fetch_listings as fetch_nipa
-
+from ..scrapers.iris import (
+    IrisRaw,
+)
+from ..scrapers.iris import (
+    detail_url as iris_detail_url,
+)
+from ..scrapers.iris import (
+    fetch_listings as fetch_iris,
+)
+from ..scrapers.nipa import NipaRaw
+from ..scrapers.nipa import detail_url as nipa_detail_url
+from ..scrapers.nipa import fetch_listings as fetch_nipa
+from ..scrapers.ntis import (
+    NtisRaw,
+)
+from ..scrapers.ntis import (
+    detail_url as ntis_detail_url,
+)
+from ..scrapers.ntis import (
+    fetch_listings as fetch_ntis,
+)
+from . import register
 
 logger = logging.getLogger(__name__)
 
 SOURCE_KEY_BIZINFO = "bizinfo"
 SOURCE_KEY_NIPA = "nipa"
+SOURCE_KEY_IRIS = "iris"
+SOURCE_KEY_NTIS = "ntis"
 _FAR_FUTURE = date(9999, 12, 31)
 
 
-@register("gov-support")
 def fetch() -> list[Item]:
+    return fetch_result().items
+
+
+@register("gov-support")
+def fetch_result() -> AdapterResult:
     """Aggregate sources, then enrich NEW bizinfo items via DETAIL fetch,
     then sort by deadline. Caller is the scrape stage which feeds the result
     into diff + DB write."""
     items: list[Item] = []
+    reports: list[SourceReport] = []
     with HttpClient() as client:
         # --- 1. bizinfo list ---
         bizinfo_fallback_items: list[Item] = []
@@ -69,9 +102,19 @@ def fetch() -> list[Item]:
             )
             bizinfo_raws = []
             bizinfo_fallback_items = _load_cached_bizinfo_items()
+            reports.append(SourceReport(
+                source_key=SOURCE_KEY_BIZINFO,
+                status="fallback" if bizinfo_fallback_items else "failed",
+                item_count=len(bizinfo_fallback_items),
+                error=str(e),
+            ))
         else:
             if bizinfo_result.complete:
                 bizinfo_raws = bizinfo_result.items
+                reports.append(SourceReport(
+                    source_key=SOURCE_KEY_BIZINFO, status="fresh",
+                    item_count=len(bizinfo_raws),
+                ))
             else:
                 # Pagination stopped partway through — trusting this as
                 # "today's full list" would make every un-scraped item look
@@ -85,15 +128,100 @@ def fetch() -> list[Item]:
                 )
                 bizinfo_raws = []
                 bizinfo_fallback_items = _load_cached_bizinfo_items()
+                error = f"incomplete pagination ({len(bizinfo_result.items)} items collected)"
+                reports.append(SourceReport(
+                    source_key=SOURCE_KEY_BIZINFO,
+                    status="fallback" if bizinfo_fallback_items else "failed",
+                    item_count=len(bizinfo_fallback_items),
+                    error=error,
+                ))
 
         # --- 2. NIPA ---
         try:
             nipa_raws = fetch_nipa(client)
         except ScrapeError as e:
-            logger.warning("nipa list failed: %s", e)
+            logger.warning("nipa list failed: %s — falling back to last cached snapshot", e)
             nipa_raws = []
+            nipa_fallback_items = _load_cached_source_items(SOURCE_KEY_NIPA)
+            reports.append(SourceReport(
+                source_key=SOURCE_KEY_NIPA,
+                status="fallback" if nipa_fallback_items else "failed",
+                item_count=len(nipa_fallback_items),
+                error=str(e),
+            ))
+        else:
+            nipa_fallback_items = []
+            reports.append(SourceReport(
+                source_key=SOURCE_KEY_NIPA, status="fresh", item_count=len(nipa_raws),
+            ))
 
-        # --- 3. Identify which bizinfo stable_ids are NEW (need detail fetch).
+        # --- 3. IRIS ---
+        try:
+            iris_result = fetch_iris(client)
+        except ScrapeError as e:
+            logger.warning("IRIS list failed: %s — falling back to cached snapshot", e)
+            iris_raws = []
+            iris_fallback_items = _load_cached_source_items(SOURCE_KEY_IRIS)
+            reports.append(SourceReport(
+                source_key=SOURCE_KEY_IRIS,
+                status="fallback" if iris_fallback_items else "failed",
+                item_count=len(iris_fallback_items),
+                error=str(e),
+            ))
+        else:
+            if iris_result.complete:
+                iris_raws = iris_result.items
+                iris_fallback_items = []
+                reports.append(SourceReport(
+                    source_key=SOURCE_KEY_IRIS,
+                    status="fresh",
+                    item_count=len(iris_raws),
+                ))
+            else:
+                iris_raws = []
+                iris_fallback_items = _load_cached_source_items(SOURCE_KEY_IRIS)
+                error = f"incomplete pagination ({len(iris_result.items)} items collected)"
+                reports.append(SourceReport(
+                    source_key=SOURCE_KEY_IRIS,
+                    status="fallback" if iris_fallback_items else "failed",
+                    item_count=len(iris_fallback_items),
+                    error=error,
+                ))
+
+        # --- 4. NTIS: only upcoming/open announcements ---
+        try:
+            ntis_result = fetch_ntis(client)
+        except ScrapeError as e:
+            logger.warning("NTIS list failed: %s — falling back to cached snapshot", e)
+            ntis_raws = []
+            ntis_fallback_items = _load_cached_source_items(SOURCE_KEY_NTIS)
+            reports.append(SourceReport(
+                source_key=SOURCE_KEY_NTIS,
+                status="fallback" if ntis_fallback_items else "failed",
+                item_count=len(ntis_fallback_items),
+                error=str(e),
+            ))
+        else:
+            if ntis_result.complete:
+                ntis_raws = ntis_result.items
+                ntis_fallback_items = []
+                reports.append(SourceReport(
+                    source_key=SOURCE_KEY_NTIS,
+                    status="fresh",
+                    item_count=len(ntis_raws),
+                ))
+            else:
+                ntis_raws = []
+                ntis_fallback_items = _load_cached_source_items(SOURCE_KEY_NTIS)
+                error = f"incomplete pagination ({len(ntis_result.items)} items collected)"
+                reports.append(SourceReport(
+                    source_key=SOURCE_KEY_NTIS,
+                    status="fallback" if ntis_fallback_items else "failed",
+                    item_count=len(ntis_fallback_items),
+                    error=error,
+                ))
+
+        # --- 5. Identify which bizinfo stable_ids are NEW (need detail fetch).
         # Look up existing stable_ids in the DB; today's scrape is "new" for
         # any id not already there. We do this in a single SELECT regardless
         # of how many ids we have (Turso handles it).
@@ -106,7 +234,7 @@ def fetch() -> list[Item]:
                 len(bizinfo_raws), len(new_bizinfo_ids),
             )
 
-        # --- 4. Fetch DETAIL for new bizinfo items (one HTTP call per item).
+        # --- 6. Fetch DETAIL for new bizinfo items (one HTTP call per item).
         # Failure of one detail doesn't break the run — we just lose that
         # item's enrichment.
         details_by_id: dict[str, BizinfoDetail] = {}
@@ -119,14 +247,19 @@ def fetch() -> list[Item]:
             except ScrapeError as e:
                 logger.warning("bizinfo detail %s failed: %s", raw.pblanc_id, e)
 
-    # --- 5. Convert raws to Items
+    # --- 7. Convert raws to Items
     items.extend(_from_bizinfo(r, details_by_id.get(r.pblanc_id)) for r in bizinfo_raws)
     items.extend(bizinfo_fallback_items)
     items.extend(_from_nipa(r) for r in nipa_raws)
+    items.extend(nipa_fallback_items)
+    items.extend(_from_iris(r) for r in iris_raws)
+    items.extend(iris_fallback_items)
+    items.extend(_from_ntis(r) for r in ntis_raws)
+    items.extend(ntis_fallback_items)
 
-    # --- 6. Sort by deadline asc, None last (stable for ties)
+    # --- 8. Sort by deadline asc, None last (stable for ties)
     items.sort(key=lambda i: i.deadline or _FAR_FUTURE)
-    return items
+    return AdapterResult(items=items, source_reports=tuple(reports))
 
 
 def _load_cached_bizinfo_items() -> list[Item]:
@@ -135,18 +268,31 @@ def _load_cached_bizinfo_items() -> list[Item]:
     was — `last_seen` only advances on a day bizinfo actually succeeded, so
     this is stable across consecutive outage days). SAFE: closes its own
     connection."""
+    return _load_cached_source_items(SOURCE_KEY_BIZINFO)
+
+
+def _load_cached_source_items(source_key: str) -> list[Item]:
     client = db.connect()
     try:
         db.migrate(client)
         result = client.execute(
-            "SELECT stable_id, source_key, title, detail_url, category, "
-            "organizer, amount, apply_period, deadline, region, target, "
-            "summary, badges_json FROM item "
-            "WHERE archive_key = 'gov-support' AND source_key = ? AND last_seen = ("
-            "  SELECT MAX(last_seen) FROM item "
-            "  WHERE archive_key = 'gov-support' AND source_key = ?"
+            "SELECT i.stable_id, i.source_key, i.title, i.detail_url, i.category, "
+            "i.organizer, i.amount, i.apply_period, i.deadline, i.region, i.target, "
+            "i.summary, i.badges_json, i.first_seen, i.active_since "
+            "FROM daily_status d JOIN item i USING (stable_id) "
+            "JOIN scrape_run r ON r.snapshot_date=d.snapshot_date "
+            " AND r.archive_key=d.archive_key "
+            "WHERE d.archive_key='gov-support' AND i.source_key=? "
+            "AND d.status IN ('new','ongoing') AND r.status='complete' "
+            "AND d.snapshot_date=("
+            "  SELECT MAX(d2.snapshot_date) FROM daily_status d2 "
+            "  JOIN item i2 USING (stable_id) "
+            "  JOIN scrape_run r2 ON r2.snapshot_date=d2.snapshot_date "
+            "   AND r2.archive_key=d2.archive_key "
+            "  WHERE d2.archive_key='gov-support' AND i2.source_key=? "
+            "   AND d2.status IN ('new','ongoing') AND r2.status='complete'"
             ")",
-            (SOURCE_KEY_BIZINFO, SOURCE_KEY_BIZINFO),
+            (source_key, source_key),
         )
         return [db._item_from_db_row(r) for r in result.rows]
     finally:
@@ -230,4 +376,32 @@ def _from_nipa(r: NipaRaw) -> Item:
         category=None,
         organizer="NIPA",
         badges=badges,
+    )
+
+
+def _from_iris(r: IrisRaw) -> Item:
+    return Item(
+        stable_id=f"{SOURCE_KEY_IRIS}:{r.ancm_id}",
+        source_key=SOURCE_KEY_IRIS,
+        title=r.title,
+        detail_url=iris_detail_url(r.ancm_id),
+        category="R&D",
+        organizer=r.organizer,
+        apply_period=r.apply_period,
+        deadline=r.deadline,
+        badges=assign_badges(title=r.title, summary=None, organizer=r.organizer),
+    )
+
+
+def _from_ntis(r: NtisRaw) -> Item:
+    return Item(
+        stable_id=f"{SOURCE_KEY_NTIS}:{r.rnd_uid}",
+        source_key=SOURCE_KEY_NTIS,
+        title=r.title,
+        detail_url=ntis_detail_url(r.rnd_uid),
+        category="R&D",
+        organizer=r.organizer,
+        apply_period=r.apply_period,
+        deadline=r.deadline,
+        badges=assign_badges(title=r.title, summary=None, organizer=r.organizer),
     )

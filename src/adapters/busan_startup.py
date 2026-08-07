@@ -1,47 +1,121 @@
-"""Adapter for the busan-startup archive.
-
-**Current implementation: static JSON.** The source sites (busanstartup.kr,
-pms.ripc.org, etc.) are JavaScript-rendered SPAs that don't expose an XHR
-endpoint discoverable from the raw HTML. A real scraper would need browser
-automation (Playwright/Selenium) which adds ~200 MB and ~30 s of CI install
-overhead — not worth it for an archive of ~19 items that rarely change.
-
-So this adapter emits items from a frozen JSON snapshot extracted from the
-legacy 2026-05-13.html archive. The mail/push cycle runs daily and the
-archive page stays alive, but the content is stable. When time permits, we
-either:
-  (a) hand-update _data/busan_startup_static.json with new items
-  (b) implement a real scraper with browser automation in a future PR
-
-Bookkeeping note: this adapter's items always classify as 'ongoing' for any
-day they appear in (because they're identical from one run to the next),
-which is the right semantic — they ARE ongoing facilities/services.
-"""
+"""부산창업포털 실시간 공고와 장기 운영 서비스를 합치는 어댑터."""
 
 from __future__ import annotations
 
 import json
+import logging
 from datetime import date
 from pathlib import Path
 
+from ..models import AdapterResult, Item, SourceReport
+from ..render.labels import assign_badges
+from ..scrapers.base import HttpClient, ScrapeError
+from ..scrapers.busan_startup import (
+    BusanStartupRaw,
+    detail_url,
+    fetch_listings,
+)
 from . import register
-from ..models import Item
+from .kstartup_cache import load_cached_items
 
+logger = logging.getLogger(__name__)
 
+SOURCE_KEY_SUPPORT = "busan_startup"
+SOURCE_KEY_SERVICE = "busan_service"
 _DATA_FILE = Path(__file__).resolve().parent / "_data" / "busan_startup_static.json"
+
+_CATEGORY_BY_CODE = {
+    "1": "education",
+    "2": "facility",
+    "3": "mentoring",
+    "4": "commercialization",
+    "5": "policy_fund",
+    "6": "rnd",
+    "7": "global",
+    "8": "networking",
+}
+
+
+def fetch() -> list[Item]:
+    return fetch_result().items
 
 
 @register("busan-startup")
-def fetch() -> list[Item]:
-    with _DATA_FILE.open(encoding="utf-8") as f:
-        payload = json.load(f)
-    return [_row_to_item(r) for r in payload["items"]]
+def fetch_result() -> AdapterResult:
+    reports: list[SourceReport] = []
+    try:
+        with HttpClient() as client:
+            result = fetch_listings(client)
+    except ScrapeError as exc:
+        support_items = _load_support_fallback()
+        reports.append(SourceReport(
+            source_key=SOURCE_KEY_SUPPORT,
+            status="fallback" if support_items else "failed",
+            item_count=len(support_items),
+            error=str(exc),
+        ))
+    else:
+        if result.complete:
+            support_items = [_from_raw(row) for row in result.items]
+            reports.append(SourceReport(
+                source_key=SOURCE_KEY_SUPPORT,
+                status="fresh",
+                item_count=len(support_items),
+            ))
+        else:
+            support_items = _load_support_fallback()
+            reports.append(SourceReport(
+                source_key=SOURCE_KEY_SUPPORT,
+                status="fallback" if support_items else "failed",
+                item_count=len(support_items),
+                error=f"incomplete pagination ({len(result.items)} items collected)",
+            ))
+
+    service_items = _load_static_items(SOURCE_KEY_SERVICE)
+    reports.append(SourceReport(
+        source_key=SOURCE_KEY_SERVICE,
+        status="static",
+        item_count=len(service_items),
+    ))
+    items = support_items + service_items
+    items.sort(key=lambda item: (item.deadline is None, item.deadline or date.max, item.stable_id))
+    return AdapterResult(items=items, source_reports=tuple(reports))
 
 
-def _row_to_item(r: dict) -> Item:
-    deadline_str = r.get("deadline")
+def _load_support_fallback() -> list[Item]:
+    cached = load_cached_items("busan-startup", SOURCE_KEY_SUPPORT)
+    return cached or _load_static_items(SOURCE_KEY_SUPPORT)
+
+
+def _load_static_items(source_key: str) -> list[Item]:
+    with _DATA_FILE.open(encoding="utf-8") as file:
+        payload = json.load(file)
+    return [_row_to_item(row) for row in payload["items"] if row["source_key"] == source_key]
+
+
+def _from_raw(raw: BusanStartupRaw) -> Item:
+    category = _CATEGORY_BY_CODE.get(raw.support_field_code or "")
+    summary_parts = [value for value in (raw.support_field, raw.target) if value]
+    return Item(
+        stable_id=f"{SOURCE_KEY_SUPPORT}:{raw.business_code}",
+        source_key=SOURCE_KEY_SUPPORT,
+        title=raw.title,
+        detail_url=detail_url(raw.business_code),
+        category=category,
+        organizer=raw.organizer,
+        apply_period=raw.apply_period,
+        deadline=raw.deadline,
+        region="부산",
+        target=raw.target,
+        summary=" · ".join(summary_parts) or None,
+        badges=assign_badges(title=raw.title, summary=None, organizer=raw.organizer),
+    )
+
+
+def _row_to_item(row: dict) -> Item:
+    deadline_str = row.get("deadline")
     deadline = date.fromisoformat(deadline_str) if deadline_str else None
-    badges_str = r.get("badges_json")
+    badges_str = row.get("badges_json")
     badges: tuple[str, ...] = ()
     if badges_str:
         try:
@@ -49,17 +123,17 @@ def _row_to_item(r: dict) -> Item:
         except (TypeError, ValueError):
             badges = ()
     return Item(
-        stable_id=r["stable_id"],
-        source_key=r["source_key"],
-        title=r["title"],
-        detail_url=r["detail_url"],
-        category=r.get("category"),
-        organizer=r.get("organizer"),
-        amount=r.get("amount"),
-        apply_period=r.get("apply_period"),
+        stable_id=row["stable_id"],
+        source_key=row["source_key"],
+        title=row["title"],
+        detail_url=row["detail_url"],
+        category=row.get("category"),
+        organizer=row.get("organizer"),
+        amount=row.get("amount"),
+        apply_period=row.get("apply_period"),
         deadline=deadline,
-        region=r.get("region"),
-        target=r.get("target"),
-        summary=r.get("summary"),
+        region=row.get("region"),
+        target=row.get("target"),
+        summary=row.get("summary"),
         badges=badges,
     )

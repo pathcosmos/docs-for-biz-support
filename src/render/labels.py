@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import re
 
-
 GPU_AI_BADGE = "🖥️ GPU·AI 인프라"
 
 # Keywords are case-insensitive; matched as whole substrings in the merged
@@ -72,7 +71,7 @@ def is_gpu_ai_infra(text: str | None) -> bool:
 # title + organizer 에서 지역명 또는 산하 시·군·구/기관명을 찾는다. Plan 결정에
 # 따라 광역으로 잡되 false positive(예: 부산은행 같은 회사명)는 운영 후
 # 사용자 피드백으로 조정. organizer 가 '부산광역시'/'경상남도'/'경북테크노파크'
-# 같은 공식 기관명이면 신뢰도 높음 — PR-PRIORITY의 `regional_score`가 이
+# 같은 공식 기관명이면 신뢰도 높음 — `regional_score`가 이
 # organizer-매칭을 title-매칭보다 높게 가중하는 이유.
 
 _BUSAN_TOKENS: tuple[str, ...] = (
@@ -151,7 +150,7 @@ def matched_regions(organizer: str | None, title: str | None) -> tuple[str, ...]
 
 def regional_score(organizer: str | None, title: str | None) -> int:
     """organizer 매칭이 title 매칭보다 신뢰도가 높다 (organizer는 거의 100%
-    채워지는 반면 title 매칭은 우연한 언급일 수 있음) — PR-PRIORITY 가중치.
+    채워지는 반면 title 매칭은 우연한 언급일 수 있음) — 우선순위 가중치.
     organizer 매칭 시 4점, organizer는 안 맞고 title만 맞으면 2점, 둘 다
     없으면 0점."""
     if organizer and any(p.search(organizer) for p in _REGION_PATTERNS.values()):

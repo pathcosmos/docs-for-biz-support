@@ -1,13 +1,15 @@
-"""state/ holds only the daily sent-marker. Item snapshots moved to Turso DB
-(see src/db.py). The marker is a small JSON file committed back to this repo
-each day so retries within the same day can skip already-sent archives."""
+"""Git-backed audit copy of the daily sent markers.
+
+Turso's ``mail_delivery`` table is the primary retry guard. These small JSON
+files remain useful for repository-visible operations history and as a fallback
+when reading historical deployments that predate the table.
+"""
 
 from __future__ import annotations
 
 import json
 from datetime import date
 from pathlib import Path
-
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STATE_DIR = REPO_ROOT / "state"

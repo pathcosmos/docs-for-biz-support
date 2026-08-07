@@ -13,12 +13,11 @@ from __future__ import annotations
 
 import logging
 
-from . import register
-from .kstartup_cache import load_cached_items
-from ..models import Item
+from ..models import AdapterResult, Item, SourceReport
 from ..scrapers.base import HttpClient, ScrapeError
 from ..scrapers.kstartup import KStartupRaw, detail_url, fetch_listings
-
+from . import register
+from .kstartup_cache import load_cached_items
 
 logger = logging.getLogger(__name__)
 
@@ -30,10 +29,15 @@ ENDPOINTS: tuple[tuple[str, str], ...] = (
 )
 
 
-@register("kstartup-global")
 def fetch() -> list[Item]:
+    return fetch_result().items
+
+
+@register("kstartup-global")
+def fetch_result() -> AdapterResult:
     seen: set[str] = set()
     out: list[Item] = []
+    reports: list[SourceReport] = []
     with HttpClient() as client:
         for endpoint, category in ENDPOINTS:
             try:
@@ -51,6 +55,11 @@ def fetch() -> list[Item]:
                     "cached snapshot for category=%s", endpoint, incomplete_reason, category,
                 )
                 cached = load_cached_items(ARCHIVE_KEY, SOURCE_KEY, category=category)
+                reports.append(SourceReport(
+                    source_key=f"{SOURCE_KEY}:{category}",
+                    status="fallback" if cached else "failed",
+                    item_count=len(cached), error=incomplete_reason,
+                ))
                 for it in cached:
                     if it.stable_id in seen:
                         continue
@@ -58,13 +67,18 @@ def fetch() -> list[Item]:
                     out.append(it)
                 continue
 
+            reports.append(SourceReport(
+                source_key=f"{SOURCE_KEY}:{category}", status="fresh",
+                item_count=len(result.items),
+            ))
+
             for r in result.items:
                 stable_id = f"{SOURCE_KEY}:{r.site_id}"
                 if stable_id in seen:
                     continue
                 seen.add(stable_id)
                 out.append(_to_item(r, endpoint, category))
-    return out
+    return AdapterResult(items=out, source_reports=tuple(reports))
 
 
 def _to_item(r: KStartupRaw, endpoint: str, category: str) -> Item:

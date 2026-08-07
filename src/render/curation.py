@@ -1,15 +1,15 @@
-"""Mail-body curation — 12-section priority-preemption classifier.
+"""Mail-body curation — priority-preemption classifier.
 
 Goal: organize gov-support's ~1400 daily items so the recipient can scan
 the mail top-to-bottom without missing a time-critical announcement, and so
 that programs relevant to a 부산/경남/경북-based, 제조·AI 연관 중견·중소기업
-surface ahead of merely-urgent-but-irrelevant ones (PR-PRIORITY).
+surface ahead of merely urgent but irrelevant ones.
 
 Each item appears in EXACTLY ONE section: the highest-priority section it
 matches. Priority order (safety-net first):
 
-  1. 🔥🎯 마감임박(0~14일) + 우선조건 동시충족
-  2. 🎯 우선조건 충족 — 부산·경남·경북 · 제조·AI · 중견·중소
+  1. 🆕🎯 신규 + 우선조건 동시충족 — active_since부터 7일간 유지
+  2. 🎯 우선조건 충족 — 신규 우선노출 기간이 지난 항목
   3. 🔥 마감 임박 (D-5) — 우선조건 미충족
   4. ⚠️ 마감 임박 (D-6 ~ D-14) — 우선조건 미충족
   5. 🆕🖥️ 오늘 신규 — GPU·AI 인프라
@@ -25,8 +25,7 @@ Within each section: deadline ASC, None last.
 
 "우선조건"(`is_priority_match`)은 지역(부산/경남/경북) + 산업(제조/AI) +
 기업규모(중견/중소) 3개 신호를 가중치 점수로 합산해 `PRIORITY_SCORE_THRESHOLD`
-이상이면 성립 — AND도 OR도 아닌 스코어링 방식 (자세한 근거는
-/Users/lanco/.claude/plans/wondrous-sprouting-reef.md 참고). 순수 지역매칭만
+이상이면 성립 — AND도 OR도 아닌 스코어링 방식. 순수 지역매칭만
 으로는 threshold를 못 넘기 때문에(4점 < 6점), 섹션 6이 그 항목들의 유일한
 전용 자리로 남는다 — 부산 전용이던 옛 섹션을 지우지 않고 3개 지역으로 넓힌
 이유. GPU 신호는 우선조건 스코어에 넣지 않는다 — GPU 항목은 전용 섹션
@@ -43,9 +42,8 @@ from datetime import date, timedelta
 from ..models import Item
 from .labels import GPU_AI_BADGE, is_reannouncement, matched_regions, regional_score
 
-
 # 섹션 식별자 — 렌더러가 헤더 색/emoji 매핑할 때 사용.
-SEC_URGENT_PRIORITY = "urgent_priority"
+SEC_NEW_PRIORITY     = "new_priority"
 SEC_PRIORITY_MATCH  = "priority_match"
 SEC_DEADLINE_5    = "deadline_5"
 SEC_DEADLINE_14   = "deadline_14"
@@ -68,7 +66,7 @@ SECTION_MAX_ITEMS: dict[str, int] = {
 # 섹션 메타 — 헤더 출력에 사용. 색은 plan 표와 일치.
 SECTION_META: dict[str, tuple[str, str, str]] = {
     # key                 -> (emoji+title,                                        header_color,  card_border_color)
-    SEC_URGENT_PRIORITY:  ("🔥🎯 마감임박 + 우선조건 동시충족",                    "#b71c1c",    "#b71c1c"),
+    SEC_NEW_PRIORITY:     ("🆕🎯 신규 + 우선조건 동시충족",                       "#b71c1c",    "#b71c1c"),
     SEC_PRIORITY_MATCH:   ("🎯 우선조건 충족 — 부산·경남·경북 · 제조·AI · 중견·중소", "#283593", "#283593"),
     SEC_DEADLINE_5:       ("🔥 마감 임박 (D-5)",                                   "#ea4335",    "#ea4335"),
     SEC_DEADLINE_14:      ("⚠️ 마감 임박 (D-6 ~ D-14)",                           "#f57c00",    "#f57c00"),
@@ -91,6 +89,7 @@ class CurationSection:
     border_color: str  # item-card border-left color
     items: list[Item] = field(default_factory=list)
     overflow_count: int = 0
+    total_count: int = 0
 
 
 _FAR_FUTURE = date(9999, 12, 31)
@@ -117,7 +116,7 @@ _MIDSME_MFG_TOKENS = ("제조", "스마트공장", "공정", "설비", "생산")
 
 
 def is_midsme_ai_mfg_gpu_item(item: Item, threshold: int = 3) -> bool:
-    """PR-PRIORITY의 `is_priority_match`로 대체됨(섹션 라우팅에서는 더 이상
+    """`is_priority_match`로 대체됨(섹션 라우팅에서는 더 이상
     호출되지 않음) — 참고/하위호환용으로 유지."""
     haystack = _haystack(item)
     if not any(token in haystack for token in _MIDSME_HARD_TOKENS):
@@ -178,6 +177,7 @@ def classify_for_curation(
     items_ongoing: list[Item],
     items_expired: list[Item],
     today: date,
+    apply_caps: bool = True,
 ) -> list[CurationSection]:
     """Return sections in display order. Empty sections still appear
     in the result list — the renderer drops them by checking `items`."""
@@ -196,13 +196,18 @@ def classify_for_curation(
     pool = items_new + items_ongoing
     new_ids = {i.stable_id for i in items_new}
 
-    # 1. 마감임박(0~14일) + 우선조건 동시충족
+    # 1. 신규 + 우선조건 동시충족. The one-day `new` status is not enough
+    # for a seven-day feature window, so active_since tracks the current
+    # active cycle. Fresh preview/test items defensively fall back to today.
     for i in pool:
         if i.stable_id in claimed: continue
-        if i.deadline and today <= i.deadline <= d14_cutoff and is_priority_match(i):
-            _put(SEC_URGENT_PRIORITY, i)
+        new_since = i.active_since or (today if i.stable_id in new_ids else None)
+        age_days = (today - new_since).days if new_since else None
+        if age_days is not None and 0 <= age_days < 7 and is_priority_match(i):
+            _put(SEC_NEW_PRIORITY, i)
 
-    # 2. 우선조건 충족 (마감 여유 있거나 마감 없음)
+    # 2. 우선조건 충족. After the seven-day feature window, matching items
+    # stay here even when their deadline is within 14 days.
     for i in pool:
         if i.stable_id in claimed: continue
         if is_priority_match(i):
@@ -265,13 +270,23 @@ def classify_for_curation(
     # 12. expired — 전용 pool
     sections[SEC_EXPIRED] = list(items_expired)
 
-    # 각 섹션 내 정렬 (expired 제외 — 모두 deadline ASC).
-    for key in sections:
-        sections[key].sort(key=_sort_key)
+    # 각 섹션 내 정렬. Top priority keeps deadline urgency first and uses the
+    # newest active cycle as the tie-breaker.
+    for key, section_items in sections.items():
+        if key == SEC_NEW_PRIORITY:
+            section_items.sort(
+                key=lambda i: (
+                    _sort_key(i),
+                    -(i.active_since or today).toordinal(),
+                    i.stable_id,
+                )
+            )
+        else:
+            section_items.sort(key=lambda i: (_sort_key(i), i.stable_id))
 
     # 출력 순서대로 CurationSection 객체 빌드.
     order = [
-        SEC_URGENT_PRIORITY, SEC_PRIORITY_MATCH,
+        SEC_NEW_PRIORITY, SEC_PRIORITY_MATCH,
         SEC_DEADLINE_5, SEC_DEADLINE_14,
         SEC_NEW_GPU, SEC_REGIONAL, SEC_GPU_ONGOING, SEC_NEW_OTHER,
         SEC_REANNOUNCE, SEC_ONGOING, SEC_ALWAYS_OPEN,
@@ -281,13 +296,14 @@ def classify_for_curation(
     for key in order:
         title, hdr, brd = SECTION_META[key]
         section_items = sections[key]
+        total_count = len(section_items)
         overflow_count = 0
-        cap = SECTION_MAX_ITEMS.get(key)
+        cap = SECTION_MAX_ITEMS.get(key) if apply_caps else None
         if cap is not None and len(section_items) > cap:
             overflow_count = len(section_items) - cap
             section_items = section_items[:cap]
         result.append(CurationSection(
             key=key, title=title, header_color=hdr, border_color=brd,
-            items=section_items, overflow_count=overflow_count,
+            items=section_items, overflow_count=overflow_count, total_count=total_count,
         ))
     return result
