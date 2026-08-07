@@ -46,7 +46,9 @@ uv run --frozen ruff check src tests
 
 운영 환경 변수는 `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, `GMAIL_USER`,
 `GMAIL_APP_PASSWORD`, `MAIL_TO`, `MAIL_CC_GOV_SUPPORT`,
-`ARCHIVE_PUSH_TOKEN`입니다. 실제 비밀값은 GitHub Actions secrets에만 둡니다.
+`ARCHIVE_PUSH_TOKEN`입니다. 기업마당에서 발급받은 `BIZINFO_API_KEY`를 추가하면
+공식 JSON API를 최우선으로 사용합니다. 키가 없어도 공식 전체 엑셀 다운로드와
+HTML 목록을 순서대로 사용합니다. 실제 비밀값은 GitHub Actions secrets에만 둡니다.
 
 수동 복구는 `scrape.yml`과 `mail.yml`의 `workflow_dispatch`로 실행하며, 정기
 스케줄은 중복 방지를 위해 `daily.yml`에만 있습니다.

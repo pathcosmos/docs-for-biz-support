@@ -328,10 +328,10 @@ def _from_bizinfo(r: BizinfoRaw, det: BizinfoDetail | None) -> Item:
     """Bizinfo row → Item. When DETAIL data is present (NEW items), we merge
     in summary/hashtags and run the GPU·AI keyword matcher across title +
     summary + hashtags + organizer."""
-    summary = det.summary if det else None
-    hashtags = list(det.hashtags) if det else []
+    summary = (det.summary if det else None) or r.summary
+    hashtags = list(dict.fromkeys([*r.hashtags, *(det.hashtags if det else ())]))
     region = (det.region if det else None) or None
-    target = (det.target if det else None) or None
+    target = (det.target if det else None) or r.target
     amount = (det.amount if det else None) or None
 
     badges = assign_badges(

@@ -55,11 +55,10 @@ class HttpClient:
     def __exit__(self, *exc) -> None:
         self.close()
 
-    def get(self, url: str, params: dict | None = None, timeout: float | None = None) -> str:
-        """GET with retry. Returns response text on success; raises ScrapeError
-        after `self.retries` failed attempts. `timeout` overrides `self.timeout`
-        for this call only (e.g. a caller doing a very high request-count walk
-        may want to fail faster per-request than a one-off fetch)."""
+    def _get_response(
+        self, url: str, params: dict | None = None, timeout: float | None = None,
+    ) -> httpx.Response:
+        """GET with retry and return the fully buffered response."""
         last_exc: Exception | None = None
         req_timeout = self.timeout if timeout is None else timeout
         for attempt in range(self.retries):
@@ -70,7 +69,7 @@ class HttpClient:
                         f"{r.status_code} for {url}", request=r.request, response=r
                     )
                 r.raise_for_status()
-                return r.text
+                return r
             except (httpx.HTTPError, httpx.TimeoutException) as e:
                 last_exc = e
                 if attempt < self.retries - 1:
@@ -84,3 +83,13 @@ class HttpClient:
             f"failed after {self.retries} attempts: {url} "
             f"(last error: {type(last_exc).__name__}: {last_exc})"
         ) from last_exc
+
+    def get(self, url: str, params: dict | None = None, timeout: float | None = None) -> str:
+        """GET text with retry. `timeout` overrides the client default."""
+        return self._get_response(url, params=params, timeout=timeout).text
+
+    def get_bytes(
+        self, url: str, params: dict | None = None, timeout: float | None = None,
+    ) -> bytes:
+        """GET binary content with the same retry policy as :meth:`get`."""
+        return self._get_response(url, params=params, timeout=timeout).content

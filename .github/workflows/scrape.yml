@@ -49,6 +49,7 @@ jobs:
           # exposed to this step (least-privilege).
           TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
           TURSO_AUTH_TOKEN:   ${{ secrets.TURSO_AUTH_TOKEN }}
+          BIZINFO_API_KEY:    ${{ secrets.BIZINFO_API_KEY }}
           ONLY:               ${{ inputs.only }}
           DRY_RUN:            ${{ inputs.dry_run }}
           BACKFILL_DETAILS:   ${{ inputs.backfill_details }}
