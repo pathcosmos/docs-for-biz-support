@@ -43,6 +43,7 @@ logger = logging.getLogger(__name__)
 
 BOT_NAME = "pathcosmos-bot"
 BOT_EMAIL = "bot@users.noreply.github.com"
+DEFAULT_PAGES_TIMEOUT_SECONDS = 240.0
 
 
 class PushError(RuntimeError):
@@ -161,7 +162,7 @@ def wait_for_pages(
     cfg: ArchiveConfig,
     today: date,
     *,
-    timeout_seconds: float = 90.0,
+    timeout_seconds: float = DEFAULT_PAGES_TIMEOUT_SECONDS,
     interval_seconds: float = 5.0,
     fetcher: Callable[[str], str] | None = None,
 ) -> str:

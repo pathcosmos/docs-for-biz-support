@@ -174,3 +174,38 @@ def test_fetch_listings_stops_normally_on_empty_page():
     result = bizinfo.fetch_listings(client)
     assert result.complete is True
     assert [i.pblanc_id for i in result.items] == ["PBLN_000000000000001"]
+
+
+def test_fetch_listings_retries_excel_after_connect_timeout(monkeypatch):
+    pblanc_id = "PBLN_000000000000999"
+    excel = _xlsx_bytes([[
+        "1", "중소벤처기업부", "전담기관", "기술", "지연 재시도 공고",
+        "2026-08-01", "2026-08-31", "2026-08-02",
+        f"https://www.bizinfo.go.kr/x?pblancId={pblanc_id}",
+    ]])
+    sleeps: list[float] = []
+
+    class RecoveringClient(_FakeHttpClient):
+        def __init__(self):
+            super().__init__({}, fail_pages={1})
+            self.excel_calls = 0
+
+        def get(self, url, params=None, timeout=None):
+            raise ScrapeError("failed (last error: ConnectTimeout: timed out)")
+
+        def get_bytes(self, url, params=None, timeout=None):
+            self.excel_calls += 1
+            if self.excel_calls <= len(bizinfo.BASE_MIRRORS):
+                raise ScrapeError("failed (last error: ConnectTimeout: timed out)")
+            return excel
+
+    monkeypatch.setattr(bizinfo.time, "sleep", sleeps.append)
+    client = RecoveringClient()
+
+    result = bizinfo.fetch_listings(client)
+
+    assert result.complete is True
+    assert result.channel == "excel"
+    assert [item.pblanc_id for item in result.items] == [pblanc_id]
+    assert sleeps == [bizinfo.OUTAGE_RETRY_DELAY_SECONDS]
+    assert client.excel_calls == len(bizinfo.BASE_MIRRORS) + 1

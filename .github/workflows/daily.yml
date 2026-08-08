@@ -93,6 +93,7 @@ jobs:
           if [ -n "${ONLY:-}" ]; then args+=(--only "$ONLY"); fi
           uv run --frozen python -m src.cli "${args[@]}"
       - name: commit auditable sent markers
+        if: ${{ always() }}
         run: |
           set -euo pipefail
           if [ -z "$(git status --porcelain state/ 2>/dev/null)" ]; then

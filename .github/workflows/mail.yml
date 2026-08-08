@@ -72,7 +72,7 @@ jobs:
           uv run --frozen python -m src.cli "${args[@]}"
 
       - name: commit state
-        if: ${{ inputs.dry_run != true }}
+        if: ${{ always() && inputs.dry_run != true }}
         run: |
           set -euo pipefail
           if [ -z "$(git status --porcelain state/ 2>/dev/null)" ]; then

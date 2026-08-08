@@ -4,7 +4,11 @@ import pytest
 
 from src.config.archives import ARCHIVES
 from src.mailer import gmail_smtp
-from src.push.github_push import wait_for_pages
+from src.push.github_push import DEFAULT_PAGES_TIMEOUT_SECONDS, wait_for_pages
+
+
+def test_pages_default_timeout_allows_slow_cdn_publication():
+    assert DEFAULT_PAGES_TIMEOUT_SECONDS >= 180
 
 
 def test_wait_for_pages_retries_until_expected_document_is_visible():

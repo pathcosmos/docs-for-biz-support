@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import re
+import time
 import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass
@@ -53,6 +54,7 @@ MAX_PAGES = 200    # 15/page × 200 = 3000 ceiling — plenty
 # fails in under half the time without changing the outcome (a hung
 # connection was never going to complete within DEFAULT_TIMEOUT=20s either).
 LIST_PAGE_TIMEOUT = 10.0
+OUTAGE_RETRY_DELAY_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -100,6 +102,38 @@ def fetch_listings(client: HttpClient) -> BizinfoListResult:
             logger.info("bizinfo: %d items collected through official API", len(items))
             return BizinfoListResult(items=items, complete=True, channel="api")
 
+    excel_result = _fetch_excel_from_hosts(client, failures, label="excel")
+    if excel_result:
+        return excel_result
+
+    try:
+        return _fetch_html_listings(client)
+    except ScrapeError as e:
+        failures.append(f"html: {e}")
+
+    # A ConnectTimeout on both aliases means the shared origin was temporarily
+    # unreachable. One delayed Excel retry gives that origin time to recover
+    # without repeating the ~100-request HTML walk. Parse/schema failures are
+    # deterministic and should fall back to cache immediately instead.
+    if any("ConnectTimeout" in failure for failure in failures):
+        logger.warning(
+            "bizinfo origin unreachable; retrying Excel after %.0fs",
+            OUTAGE_RETRY_DELAY_SECONDS,
+        )
+        time.sleep(OUTAGE_RETRY_DELAY_SECONDS)
+        excel_result = _fetch_excel_from_hosts(client, failures, label="delayed excel")
+        if excel_result:
+            return excel_result
+
+    raise ScrapeError("bizinfo all live collection paths failed: " + " | ".join(failures))
+
+
+def _fetch_excel_from_hosts(
+    client: HttpClient,
+    failures: list[str],
+    *,
+    label: str,
+) -> BizinfoListResult | None:
     for base in BASE_MIRRORS:
         try:
             payload = client.get_bytes(
@@ -109,17 +143,12 @@ def fetch_listings(client: HttpClient) -> BizinfoListResult:
             )
             items = _parse_excel(payload)
         except ScrapeError as e:
-            failures.append(f"excel {base}: {e}")
-            logger.warning("bizinfo Excel failed via %s: %s", base, e)
+            failures.append(f"{label} {base}: {e}")
+            logger.warning("bizinfo %s failed via %s: %s", label, base, e)
         else:
             logger.info("bizinfo: %d items collected through official Excel", len(items))
             return BizinfoListResult(items=items, complete=True, channel="excel")
-
-    try:
-        return _fetch_html_listings(client)
-    except ScrapeError as e:
-        failures.append(f"html: {e}")
-        raise ScrapeError("bizinfo all live collection paths failed: " + " | ".join(failures)) from e
+    return None
 
 
 def _fetch_html_listings(client: HttpClient) -> BizinfoListResult:

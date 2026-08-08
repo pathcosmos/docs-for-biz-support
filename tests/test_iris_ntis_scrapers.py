@@ -34,13 +34,31 @@ def _iris_page(current: int, total: int, rows: list[tuple[str, str, str]]) -> st
     )
 
 
-def _ntis_page(total_count: int, rows: list[tuple[str, str, str, str]]) -> str:
+def _ntis_page(
+    total_count: int,
+    rows: list[tuple[str, str, str, str]],
+    *,
+    legacy_links: bool = False,
+) -> str:
+    def announcement_cell(uid: str, title: str) -> str:
+        if legacy_links:
+            return (
+                '<td data-title="공고명" class="tl">'
+                f'<a href="/rndgate/eg/un/ra/view.do?roRndUid={uid}&amp;flag=rndList" '
+                f'title="{title}">{title}</a></td>'
+            )
+        return (
+            f'<td><input name="selectCheckList" value="{uid}" type="checkbox"></td>'
+            '<td data-title="공고명" class="tl">'
+            f'<a href="/rndgate/eg/un/ra/view.do" '
+            f'onclick="javascript:fn_view(\'{uid}\'); return false;" '
+            f'title="{title}">{title}</a></td>'
+        )
+
     body = "".join(
         "<tr>"
         '<td data-title="현황"><span>접수중</span></td>'
-        '<td data-title="공고명" class="tl">'
-        f'<a href="/rndgate/eg/un/ra/view.do?roRndUid={uid}&amp;flag=rndList" '
-        f'title="{title}">{title}</a></td>'
+        f"{announcement_cell(uid, title)}"
         f'<td data-title="부처명">{organizer}</td>'
         '<td data-title="접수일">2026.08.01</td>'
         f'<td data-title="마감일">{end_date}</td>'
@@ -108,5 +126,31 @@ def test_ntis_midway_failure_is_incomplete():
         fail_pages={2},
     )
     result = ntis.fetch_listings(client)
+    assert result.complete is False
+    assert [item.rnd_uid for item in result.items] == ["1000"]
+
+
+def test_ntis_keeps_legacy_query_string_ids_compatible():
+    client = _FakeClient({
+        1: _ntis_page(
+            1,
+            [("1000", "구형 링크 공고", "과기정통부", "2026.08.18")],
+            legacy_links=True,
+        ),
+    })
+
+    result = ntis.fetch_listings(client)
+
+    assert result.complete is True
+    assert [item.rnd_uid for item in result.items] == ["1000"]
+
+
+def test_ntis_last_page_count_mismatch_is_incomplete():
+    client = _FakeClient({
+        1: _ntis_page(2, [("1000", "누락 감지 공고", "과기정통부", "2026.08.18")]),
+    })
+
+    result = ntis.fetch_listings(client)
+
     assert result.complete is False
     assert [item.rnd_uid for item in result.items] == ["1000"]
