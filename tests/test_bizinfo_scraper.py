@@ -212,9 +212,9 @@ def test_fetch_listings_retries_excel_after_connect_timeout(monkeypatch):
 
 
 def test_list_page_timeout_can_be_overridden_for_diagnostics(monkeypatch):
-    monkeypatch.setenv("BIZINFO_LIST_PAGE_TIMEOUT", "30")
+    monkeypatch.setenv("BIZINFO_LIST_PAGE_TIMEOUT", "45")
 
-    assert bizinfo._list_page_timeout() == 30.0
+    assert bizinfo._list_page_timeout() == 45.0
 
 
 @pytest.mark.parametrize("value", ["zero", "0", "121"])

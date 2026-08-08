@@ -45,15 +45,11 @@ EXCEL_PATH = "/sii/siia/selectSIIA200ExcelDownload.do"
 API_PATH = "/uss/rss/bizinfoApi.do"
 MAX_PAGES = 200    # 15/page × 200 = 3000 ceiling — plenty
 
-# The full list walk is ~95-100 sequential requests (1400+ items / 15 per
-# page). Production failures (confirmed via GH Actions log timing analysis —
-# every observed failure takes ~60-65s of pure retry-wait before giving up,
-# consistent with all 3 attempts each hitting the full per-request timeout
-# rather than a fast HTTP error) look like the request hanging until timeout
-# rather than a quick rejection — a shorter per-page timeout means a bad run
-# fails in under half the time without changing the outcome (a hung
-# connection was never going to complete within DEFAULT_TIMEOUT=20s either).
-LIST_PAGE_TIMEOUT = 10.0
+# GitHub-hosted runner measurements on 2026-08-08 established a clear boundary:
+# every 10-second connection attempt timed out, while otherwise-identical
+# 20-second and 30-second dry runs both completed a fresh 1,572-item aggregate
+# without cache fallback. Keep 50% headroom over the measured success boundary.
+LIST_PAGE_TIMEOUT = 30.0
 MAX_LIST_PAGE_TIMEOUT = 120.0
 OUTAGE_RETRY_DELAY_SECONDS = 30.0
 
