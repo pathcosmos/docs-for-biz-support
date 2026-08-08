@@ -18,6 +18,10 @@ on:
         description: 'One-shot: fetch DETAIL pages for every existing bizinfo item, re-apply GPU·AI labels (~25 min). Bypasses normal scrape.'
         type: boolean
         default: false
+      bizinfo_timeout:
+        description: 'Diagnostic only: override Bizinfo per-attempt timeout in seconds (1-120)'
+        type: string
+        default: ''
 
 permissions:
   contents: read   # scrape does not commit anything to this repo
@@ -53,6 +57,7 @@ jobs:
           ONLY:               ${{ inputs.only }}
           DRY_RUN:            ${{ inputs.dry_run }}
           BACKFILL_DETAILS:   ${{ inputs.backfill_details }}
+          BIZINFO_LIST_PAGE_TIMEOUT: ${{ inputs.bizinfo_timeout }}
         run: |
           set -euo pipefail
           if [ "${BACKFILL_DETAILS:-false}" = "true" ]; then

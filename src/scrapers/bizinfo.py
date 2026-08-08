@@ -54,6 +54,7 @@ MAX_PAGES = 200    # 15/page × 200 = 3000 ceiling — plenty
 # fails in under half the time without changing the outcome (a hung
 # connection was never going to complete within DEFAULT_TIMEOUT=20s either).
 LIST_PAGE_TIMEOUT = 10.0
+MAX_LIST_PAGE_TIMEOUT = 120.0
 OUTAGE_RETRY_DELAY_SECONDS = 30.0
 
 
@@ -90,6 +91,7 @@ _EXCEL_HEADERS = {
 def fetch_listings(client: HttpClient) -> BizinfoListResult:
     """Fetch a complete list through the strongest available official path."""
     failures: list[str] = []
+    list_page_timeout = _list_page_timeout()
 
     api_key = os.environ.get("BIZINFO_API_KEY", "").strip()
     if api_key:
@@ -102,12 +104,17 @@ def fetch_listings(client: HttpClient) -> BizinfoListResult:
             logger.info("bizinfo: %d items collected through official API", len(items))
             return BizinfoListResult(items=items, complete=True, channel="api")
 
-    excel_result = _fetch_excel_from_hosts(client, failures, label="excel")
+    excel_result = _fetch_excel_from_hosts(
+        client,
+        failures,
+        label="excel",
+        timeout=list_page_timeout,
+    )
     if excel_result:
         return excel_result
 
     try:
-        return _fetch_html_listings(client)
+        return _fetch_html_listings(client, timeout=list_page_timeout)
     except ScrapeError as e:
         failures.append(f"html: {e}")
 
@@ -121,7 +128,12 @@ def fetch_listings(client: HttpClient) -> BizinfoListResult:
             OUTAGE_RETRY_DELAY_SECONDS,
         )
         time.sleep(OUTAGE_RETRY_DELAY_SECONDS)
-        excel_result = _fetch_excel_from_hosts(client, failures, label="delayed excel")
+        excel_result = _fetch_excel_from_hosts(
+            client,
+            failures,
+            label="delayed excel",
+            timeout=list_page_timeout,
+        )
         if excel_result:
             return excel_result
 
@@ -133,13 +145,14 @@ def _fetch_excel_from_hosts(
     failures: list[str],
     *,
     label: str,
+    timeout: float,
 ) -> BizinfoListResult | None:
     for base in BASE_MIRRORS:
         try:
             payload = client.get_bytes(
                 f"{base}{EXCEL_PATH}",
                 params={"1": "1", "schEndAt": "N"},
-                timeout=LIST_PAGE_TIMEOUT,
+                timeout=timeout,
             )
             items = _parse_excel(payload)
         except ScrapeError as e:
@@ -151,7 +164,11 @@ def _fetch_excel_from_hosts(
     return None
 
 
-def _fetch_html_listings(client: HttpClient) -> BizinfoListResult:
+def _fetch_html_listings(
+    client: HttpClient,
+    *,
+    timeout: float = LIST_PAGE_TIMEOUT,
+) -> BizinfoListResult:
     """Walk every HTML page until empty and return merged items.
 
     A page that fails after retries stops pagination early rather than
@@ -165,7 +182,7 @@ def _fetch_html_listings(client: HttpClient) -> BizinfoListResult:
     seen: set[str] = set()
     for page in range(1, MAX_PAGES + 1):
         try:
-            html = _get_html_page(client, page)
+            html = _get_html_page(client, page, timeout=timeout)
         except ScrapeError as e:
             logger.warning(
                 "bizinfo page %d failed, stopping pagination early (%d items "
@@ -195,16 +212,37 @@ def _fetch_html_listings(client: HttpClient) -> BizinfoListResult:
     return BizinfoListResult(items=out, complete=True, channel="html")
 
 
-def _get_html_page(client: HttpClient, page: int) -> str:
+def _get_html_page(
+    client: HttpClient,
+    page: int,
+    *,
+    timeout: float = LIST_PAGE_TIMEOUT,
+) -> str:
     failures: list[str] = []
     params = {"cpage": page, "pageIndex": 1, "rows": 15, "schEndAt": "N"}
     for base in BASE_MIRRORS:
         url = f"{base}{LIST_PATH}"
         try:
-            return client.get(url, params=params, timeout=LIST_PAGE_TIMEOUT)
+            return client.get(url, params=params, timeout=timeout)
         except ScrapeError as e:
             failures.append(f"{base}: {e}")
     raise ScrapeError(f"bizinfo HTML page {page} failed on every host: " + " | ".join(failures))
+
+
+def _list_page_timeout() -> float:
+    raw = os.environ.get("BIZINFO_LIST_PAGE_TIMEOUT", "").strip()
+    if not raw:
+        return LIST_PAGE_TIMEOUT
+    try:
+        value = float(raw)
+    except ValueError as e:
+        raise ScrapeError(f"invalid BIZINFO_LIST_PAGE_TIMEOUT: {raw!r}") from e
+    if not 1.0 <= value <= MAX_LIST_PAGE_TIMEOUT:
+        raise ScrapeError(
+            "BIZINFO_LIST_PAGE_TIMEOUT must be between "
+            f"1 and {MAX_LIST_PAGE_TIMEOUT:.0f} seconds",
+        )
+    return value
 
 
 def _fetch_official_api(client: HttpClient, api_key: str) -> list[BizinfoRaw]:

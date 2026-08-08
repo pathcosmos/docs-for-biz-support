@@ -209,3 +209,17 @@ def test_fetch_listings_retries_excel_after_connect_timeout(monkeypatch):
     assert [item.pblanc_id for item in result.items] == [pblanc_id]
     assert sleeps == [bizinfo.OUTAGE_RETRY_DELAY_SECONDS]
     assert client.excel_calls == len(bizinfo.BASE_MIRRORS) + 1
+
+
+def test_list_page_timeout_can_be_overridden_for_diagnostics(monkeypatch):
+    monkeypatch.setenv("BIZINFO_LIST_PAGE_TIMEOUT", "30")
+
+    assert bizinfo._list_page_timeout() == 30.0
+
+
+@pytest.mark.parametrize("value", ["zero", "0", "121"])
+def test_list_page_timeout_rejects_invalid_values(monkeypatch, value):
+    monkeypatch.setenv("BIZINFO_LIST_PAGE_TIMEOUT", value)
+
+    with pytest.raises(ScrapeError, match="BIZINFO_LIST_PAGE_TIMEOUT"):
+        bizinfo._list_page_timeout()
