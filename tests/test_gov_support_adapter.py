@@ -134,4 +134,39 @@ def test_nipa_failure_uses_cache_and_surfaces_warning(tmp_path, monkeypatch):
     assert [i.stable_id for i in result.items] == ["nipa:900"]
     nipa_report = next(r for r in result.source_reports if r.source_key == "nipa")
     assert nipa_report.status == "fallback"
+    assert nipa_report.cached_snapshot_date == date.fromisoformat("2026-07-01")
+    assert "2026-07-01 스냅샷" in (nipa_report.warning or "")
     assert "nipa outage" in (nipa_report.warning or "")
+
+
+def test_bizinfo_fallback_keeps_full_diagnostics_but_shows_concise_warning(
+    tmp_path, monkeypatch,
+):
+    client = _isolated_db(tmp_path, monkeypatch)
+    _seed_cached_bizinfo_item(client)
+    client.close()
+
+    full_error = (
+        "bizinfo all live collection paths failed: "
+        "excel https://www.bizinfo.go.kr: failed after 3 attempts "
+        "(last error: ConnectError: [Errno -3] Temporary failure in name resolution)"
+    )
+    monkeypatch.setattr(
+        gov_support,
+        "fetch_bizinfo",
+        lambda client: (_ for _ in ()).throw(ScrapeError(full_error)),
+    )
+    monkeypatch.setattr(gov_support, "fetch_nipa", lambda client: [])
+
+    result = gov_support.fetch_result()
+
+    report = next(r for r in result.source_reports if r.source_key == "bizinfo")
+    assert report.error == full_error
+    assert report.cached_snapshot_date == date.fromisoformat("2026-07-01")
+    assert report.warning == (
+        "bizinfo: 수집 실패 — 2026-07-01 스냅샷 1건 사용 "
+        "(DNS 또는 네트워크 연결 실패)"
+    )
+    persisted = report.as_dict()
+    assert persisted["error"] == full_error
+    assert "https://" not in persisted["warning"]

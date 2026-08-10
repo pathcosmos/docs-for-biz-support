@@ -22,6 +22,7 @@ new items/day × 1 s = ~30 s — safe within the 30 min cron timeout.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import date
 
 from .. import db
@@ -73,6 +74,12 @@ SOURCE_KEY_NTIS = "ntis"
 _FAR_FUTURE = date(9999, 12, 31)
 
 
+@dataclass(frozen=True)
+class _CachedSnapshot:
+    items: list[Item]
+    snapshot_date: date | None
+
+
 def fetch() -> list[Item]:
     return fetch_result().items
 
@@ -101,13 +108,10 @@ def fetch_result() -> AdapterResult:
                 "bizinfo list failed: %s — falling back to last cached snapshot", e,
             )
             bizinfo_raws = []
-            bizinfo_fallback_items = _load_cached_bizinfo_items()
-            reports.append(SourceReport(
-                source_key=SOURCE_KEY_BIZINFO,
-                status="fallback" if bizinfo_fallback_items else "failed",
-                item_count=len(bizinfo_fallback_items),
-                error=str(e),
-            ))
+            bizinfo_fallback_items, fallback_report = _fallback_from_cache(
+                SOURCE_KEY_BIZINFO, str(e),
+            )
+            reports.append(fallback_report)
         else:
             if bizinfo_result.complete:
                 bizinfo_raws = bizinfo_result.items
@@ -127,14 +131,11 @@ def fetch_result() -> AdapterResult:
                     "partial scrape", len(bizinfo_result.items),
                 )
                 bizinfo_raws = []
-                bizinfo_fallback_items = _load_cached_bizinfo_items()
                 error = f"incomplete pagination ({len(bizinfo_result.items)} items collected)"
-                reports.append(SourceReport(
-                    source_key=SOURCE_KEY_BIZINFO,
-                    status="fallback" if bizinfo_fallback_items else "failed",
-                    item_count=len(bizinfo_fallback_items),
-                    error=error,
-                ))
+                bizinfo_fallback_items, fallback_report = _fallback_from_cache(
+                    SOURCE_KEY_BIZINFO, error,
+                )
+                reports.append(fallback_report)
 
         # --- 2. NIPA ---
         try:
@@ -142,13 +143,10 @@ def fetch_result() -> AdapterResult:
         except ScrapeError as e:
             logger.warning("nipa list failed: %s — falling back to last cached snapshot", e)
             nipa_raws = []
-            nipa_fallback_items = _load_cached_source_items(SOURCE_KEY_NIPA)
-            reports.append(SourceReport(
-                source_key=SOURCE_KEY_NIPA,
-                status="fallback" if nipa_fallback_items else "failed",
-                item_count=len(nipa_fallback_items),
-                error=str(e),
-            ))
+            nipa_fallback_items, fallback_report = _fallback_from_cache(
+                SOURCE_KEY_NIPA, str(e),
+            )
+            reports.append(fallback_report)
         else:
             nipa_fallback_items = []
             reports.append(SourceReport(
@@ -161,13 +159,10 @@ def fetch_result() -> AdapterResult:
         except ScrapeError as e:
             logger.warning("IRIS list failed: %s — falling back to cached snapshot", e)
             iris_raws = []
-            iris_fallback_items = _load_cached_source_items(SOURCE_KEY_IRIS)
-            reports.append(SourceReport(
-                source_key=SOURCE_KEY_IRIS,
-                status="fallback" if iris_fallback_items else "failed",
-                item_count=len(iris_fallback_items),
-                error=str(e),
-            ))
+            iris_fallback_items, fallback_report = _fallback_from_cache(
+                SOURCE_KEY_IRIS, str(e),
+            )
+            reports.append(fallback_report)
         else:
             if iris_result.complete:
                 iris_raws = iris_result.items
@@ -179,14 +174,11 @@ def fetch_result() -> AdapterResult:
                 ))
             else:
                 iris_raws = []
-                iris_fallback_items = _load_cached_source_items(SOURCE_KEY_IRIS)
                 error = f"incomplete pagination ({len(iris_result.items)} items collected)"
-                reports.append(SourceReport(
-                    source_key=SOURCE_KEY_IRIS,
-                    status="fallback" if iris_fallback_items else "failed",
-                    item_count=len(iris_fallback_items),
-                    error=error,
-                ))
+                iris_fallback_items, fallback_report = _fallback_from_cache(
+                    SOURCE_KEY_IRIS, error,
+                )
+                reports.append(fallback_report)
 
         # --- 4. NTIS: only upcoming/open announcements ---
         try:
@@ -194,13 +186,10 @@ def fetch_result() -> AdapterResult:
         except ScrapeError as e:
             logger.warning("NTIS list failed: %s — falling back to cached snapshot", e)
             ntis_raws = []
-            ntis_fallback_items = _load_cached_source_items(SOURCE_KEY_NTIS)
-            reports.append(SourceReport(
-                source_key=SOURCE_KEY_NTIS,
-                status="fallback" if ntis_fallback_items else "failed",
-                item_count=len(ntis_fallback_items),
-                error=str(e),
-            ))
+            ntis_fallback_items, fallback_report = _fallback_from_cache(
+                SOURCE_KEY_NTIS, str(e),
+            )
+            reports.append(fallback_report)
         else:
             if ntis_result.complete:
                 ntis_raws = ntis_result.items
@@ -212,14 +201,13 @@ def fetch_result() -> AdapterResult:
                 ))
             else:
                 ntis_raws = []
-                ntis_fallback_items = _load_cached_source_items(SOURCE_KEY_NTIS)
-                error = f"incomplete pagination ({len(ntis_result.items)} items collected)"
-                reports.append(SourceReport(
-                    source_key=SOURCE_KEY_NTIS,
-                    status="fallback" if ntis_fallback_items else "failed",
-                    item_count=len(ntis_fallback_items),
-                    error=error,
-                ))
+                error = ntis_result.failure_reason or (
+                    f"incomplete pagination ({len(ntis_result.items)} items collected)"
+                )
+                ntis_fallback_items, fallback_report = _fallback_from_cache(
+                    SOURCE_KEY_NTIS, error,
+                )
+                reports.append(fallback_report)
 
         # --- 5. Identify which bizinfo stable_ids are NEW (need detail fetch).
         # Look up existing stable_ids in the DB; today's scrape is "new" for
@@ -272,13 +260,32 @@ def _load_cached_bizinfo_items() -> list[Item]:
 
 
 def _load_cached_source_items(source_key: str) -> list[Item]:
+    """Compatibility wrapper for callers that only need cached items."""
+    return _load_cached_source_snapshot(source_key).items
+
+
+def _fallback_from_cache(
+    source_key: str,
+    error: str,
+) -> tuple[list[Item], SourceReport]:
+    snapshot = _load_cached_source_snapshot(source_key)
+    return snapshot.items, SourceReport(
+        source_key=source_key,
+        status="fallback" if snapshot.items else "failed",
+        item_count=len(snapshot.items),
+        error=error,
+        cached_snapshot_date=snapshot.snapshot_date,
+    )
+
+
+def _load_cached_source_snapshot(source_key: str) -> _CachedSnapshot:
     client = db.connect()
     try:
         db.migrate(client)
         result = client.execute(
             "SELECT i.stable_id, i.source_key, i.title, i.detail_url, i.category, "
             "i.organizer, i.amount, i.apply_period, i.deadline, i.region, i.target, "
-            "i.summary, i.badges_json, i.first_seen, i.active_since "
+            "i.summary, i.badges_json, i.first_seen, i.active_since, d.snapshot_date "
             "FROM daily_status d JOIN item i USING (stable_id) "
             "JOIN scrape_run r ON r.snapshot_date=d.snapshot_date "
             " AND r.archive_key=d.archive_key "
@@ -294,7 +301,21 @@ def _load_cached_source_items(source_key: str) -> list[Item]:
             ")",
             (source_key, source_key),
         )
-        return [db._item_from_db_row(r) for r in result.rows]
+        if not result.rows:
+            return _CachedSnapshot(items=[], snapshot_date=None)
+        snapshot_date: date | None = None
+        try:
+            snapshot_date = date.fromisoformat(str(result.rows[0][-1]))
+        except (TypeError, ValueError):
+            logger.warning(
+                "cached %s snapshot has invalid date: %r",
+                source_key,
+                result.rows[0][-1],
+            )
+        return _CachedSnapshot(
+            items=[db._item_from_db_row(row[:-1]) for row in result.rows],
+            snapshot_date=snapshot_date,
+        )
     finally:
         client.close()
 

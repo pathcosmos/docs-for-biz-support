@@ -128,6 +128,7 @@ def test_ntis_midway_failure_is_incomplete():
     result = ntis.fetch_listings(client)
     assert result.complete is False
     assert [item.rnd_uid for item in result.items] == ["1000"]
+    assert result.failure_reason == "page 2 request failed after 1 items: page 2 failed"
 
 
 def test_ntis_keeps_legacy_query_string_ids_compatible():
@@ -154,3 +155,6 @@ def test_ntis_last_page_count_mismatch_is_incomplete():
 
     assert result.complete is False
     assert [item.rnd_uid for item in result.items] == ["1000"]
+    assert result.failure_reason == (
+        "pagination count mismatch: expected 2, collected 1"
+    )
