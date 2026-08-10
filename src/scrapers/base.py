@@ -23,7 +23,23 @@ DEFAULT_UA = (
 class ScrapeError(RuntimeError):
     """Raised when a source can't be reached / parsed after retries. Caller
     decides whether to surface the failure in the daily mail footer or fail
-    the whole archive."""
+    the whole archive.
+
+    ``kind`` and ``transient`` preserve the machine-readable failure class so
+    callers do not have to infer retry policy by searching the human-readable
+    message. Parser-raised errors can continue to omit both fields.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: str | None = None,
+        transient: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.transient = transient
 
 
 @dataclass
@@ -56,12 +72,19 @@ class HttpClient:
         self.close()
 
     def _get_response(
-        self, url: str, params: dict | None = None, timeout: float | None = None,
+        self,
+        url: str,
+        params: dict | None = None,
+        timeout: float | None = None,
+        attempts: int | None = None,
     ) -> httpx.Response:
         """GET with retry and return the fully buffered response."""
         last_exc: Exception | None = None
         req_timeout = self.timeout if timeout is None else timeout
-        for attempt in range(self.retries):
+        attempt_count = self.retries if attempts is None else attempts
+        if attempt_count < 1:
+            raise ValueError("attempts must be at least 1")
+        for attempt in range(attempt_count):
             try:
                 r = self._client.get(url, params=params, timeout=req_timeout)
                 if r.status_code >= 500:
@@ -72,24 +95,44 @@ class HttpClient:
                 return r
             except (httpx.HTTPError, httpx.TimeoutException) as e:
                 last_exc = e
-                if attempt < self.retries - 1:
+                if attempt < attempt_count - 1:
                     sleep_for = BACKOFF_BASE ** (attempt + 1)
                     time.sleep(sleep_for)
         # Embed the real underlying error (ConnectTimeout / ReadTimeout / 5xx /
         # etc.) in the message — without this, production logs only ever show
         # "failed after 3 attempts" with no way to tell a silent network-level
         # hang apart from a fast server-side rejection.
+        error_kind = type(last_exc).__name__ if last_exc else None
+        transient = isinstance(last_exc, (httpx.TransportError, httpx.TimeoutException))
+        if isinstance(last_exc, httpx.HTTPStatusError):
+            transient = last_exc.response.status_code >= 500
         raise ScrapeError(
-            f"failed after {self.retries} attempts: {url} "
-            f"(last error: {type(last_exc).__name__}: {last_exc})"
+            f"failed after {attempt_count} attempts: {url} "
+            f"(last error: {error_kind}: {last_exc})",
+            kind=error_kind,
+            transient=transient,
         ) from last_exc
 
-    def get(self, url: str, params: dict | None = None, timeout: float | None = None) -> str:
+    def get(
+        self,
+        url: str,
+        params: dict | None = None,
+        timeout: float | None = None,
+        attempts: int | None = None,
+    ) -> str:
         """GET text with retry. `timeout` overrides the client default."""
-        return self._get_response(url, params=params, timeout=timeout).text
+        return self._get_response(
+            url, params=params, timeout=timeout, attempts=attempts,
+        ).text
 
     def get_bytes(
-        self, url: str, params: dict | None = None, timeout: float | None = None,
+        self,
+        url: str,
+        params: dict | None = None,
+        timeout: float | None = None,
+        attempts: int | None = None,
     ) -> bytes:
         """GET binary content with the same retry policy as :meth:`get`."""
-        return self._get_response(url, params=params, timeout=timeout).content
+        return self._get_response(
+            url, params=params, timeout=timeout, attempts=attempts,
+        ).content

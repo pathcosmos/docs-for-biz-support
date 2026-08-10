@@ -3,8 +3,9 @@
 Collection order:
 
 1. Authenticated official JSON API when ``BIZINFO_API_KEY`` is configured.
-2. Public official Excel download, which returns the complete current list in
-   one request.
+2. Public official Excel download, which returns authoritative application
+   dates for the same complete list in one request. When both succeed, Excel
+   supplies list/date fields and the API supplies summary/target/hashtags.
 3. The paginated HTML list on both ``www`` and bare hosts.
 
 The HTML path remains a last live fallback. Each page is server-rendered with
@@ -52,6 +53,14 @@ MAX_PAGES = 200    # 15/page × 200 = 3000 ceiling — plenty
 LIST_PAGE_TIMEOUT = 30.0
 MAX_LIST_PAGE_TIMEOUT = 120.0
 OUTAGE_RETRY_DELAY_SECONDS = 30.0
+BACKUP_HOST_ATTEMPTS = 1
+
+_ORIGIN_UNREACHABLE_KINDS = {
+    "ConnectError",
+    "ConnectTimeout",
+    "NetworkError",
+    "ProxyError",
+}
 
 
 @dataclass(frozen=True)
@@ -87,6 +96,8 @@ _EXCEL_HEADERS = {
 def fetch_listings(client: HttpClient) -> BizinfoListResult:
     """Fetch a complete list through the strongest available official path."""
     failures: list[str] = []
+    live_errors: list[ScrapeError] = []
+    api_items: list[BizinfoRaw] | None = None
     list_page_timeout = _list_page_timeout()
 
     api_key = os.environ.get("BIZINFO_API_KEY", "").strip()
@@ -98,27 +109,65 @@ def fetch_listings(client: HttpClient) -> BizinfoListResult:
             logger.warning("bizinfo official API failed, trying Excel: %s", e)
         else:
             logger.info("bizinfo: %d items collected through official API", len(items))
-            return BizinfoListResult(items=items, complete=True, channel="api")
+            api_items = items
+    elif os.environ.get("GITHUB_ACTIONS") == "true":
+        logger.warning(
+            "bizinfo official API disabled: BIZINFO_API_KEY is not configured",
+        )
 
     excel_result = _fetch_excel_from_hosts(
         client,
         failures,
+        live_errors,
         label="excel",
         timeout=list_page_timeout,
+        hosts=(BASE,) if api_items is not None else BASE_MIRRORS,
+        primary_attempts=1 if api_items is not None else None,
     )
     if excel_result:
+        if api_items is not None:
+            merged = _merge_api_enrichment(excel_result.items, api_items)
+            logger.info(
+                "bizinfo: %d Excel items enriched through official API", len(merged),
+            )
+            return BizinfoListResult(items=merged, complete=True, channel="api+excel")
         return excel_result
+    if api_items is not None:
+        # The API result has already passed total-count and unique-ID checks.
+        # Prefer it to stale cache if the optional Excel date enrichment is
+        # unavailable; textual periods may be less precise, but the live list
+        # itself remains complete.
+        logger.warning(
+            "bizinfo Excel date enrichment failed; using complete API result",
+        )
+        return BizinfoListResult(items=api_items, complete=True, channel="api")
 
-    try:
-        return _fetch_html_listings(client, timeout=list_page_timeout)
-    except ScrapeError as e:
-        failures.append(f"html: {e}")
+    excel_errors = live_errors.copy()
+    origin_unreachable = (
+        len(excel_errors) == len(BASE_MIRRORS)
+        and all(_is_origin_unreachable(error) for error in excel_errors)
+    )
+    if origin_unreachable:
+        # Both aliases currently terminate at the same Bizinfo origin. When
+        # the one-request Excel path cannot even connect on either name, a
+        # full HTML request through the same origin only repeats the outage
+        # and can consume another several minutes of the workflow budget.
+        failures.append("html: skipped because every Excel host was unreachable")
+        logger.warning(
+            "bizinfo HTML fallback skipped: every Excel host was unreachable",
+        )
+    else:
+        try:
+            return _fetch_html_listings(client, timeout=list_page_timeout)
+        except ScrapeError as e:
+            failures.append(f"html: {e}")
+            live_errors.append(e)
 
-    # A ConnectTimeout on both aliases means the shared origin was temporarily
-    # unreachable. One delayed Excel retry gives that origin time to recover
-    # without repeating the ~100-request HTML walk. Parse/schema failures are
-    # deterministic and should fall back to cache immediately instead.
-    if any("ConnectTimeout" in failure for failure in failures):
+    # A connection timeout or DNS failure means the shared origin was
+    # temporarily unreachable. One delayed Excel retry gives that origin time
+    # to recover. Parse/schema failures are deterministic and should fall back
+    # to cache immediately instead.
+    if any(_is_origin_unreachable(error) for error in live_errors):
         logger.warning(
             "bizinfo origin unreachable; retrying Excel after %.0fs",
             OUTAGE_RETRY_DELAY_SECONDS,
@@ -127,8 +176,10 @@ def fetch_listings(client: HttpClient) -> BizinfoListResult:
         excel_result = _fetch_excel_from_hosts(
             client,
             failures,
+            live_errors,
             label="delayed excel",
             timeout=list_page_timeout,
+            hosts=(BASE,),
         )
         if excel_result:
             return excel_result
@@ -139,20 +190,25 @@ def fetch_listings(client: HttpClient) -> BizinfoListResult:
 def _fetch_excel_from_hosts(
     client: HttpClient,
     failures: list[str],
+    errors: list[ScrapeError],
     *,
     label: str,
     timeout: float,
+    hosts: tuple[str, ...] = BASE_MIRRORS,
+    primary_attempts: int | None = None,
 ) -> BizinfoListResult | None:
-    for base in BASE_MIRRORS:
+    for host_index, base in enumerate(hosts):
         try:
             payload = client.get_bytes(
                 f"{base}{EXCEL_PATH}",
                 params={"1": "1", "schEndAt": "N"},
                 timeout=timeout,
+                attempts=primary_attempts if host_index == 0 else BACKUP_HOST_ATTEMPTS,
             )
             items = _parse_excel(payload)
         except ScrapeError as e:
             failures.append(f"{label} {base}: {e}")
+            errors.append(e)
             logger.warning("bizinfo %s failed via %s: %s", label, base, e)
         else:
             logger.info("bizinfo: %d items collected through official Excel", len(items))
@@ -215,14 +271,38 @@ def _get_html_page(
     timeout: float = LIST_PAGE_TIMEOUT,
 ) -> str:
     failures: list[str] = []
+    errors: list[ScrapeError] = []
     params = {"cpage": page, "pageIndex": 1, "rows": 15, "schEndAt": "N"}
-    for base in BASE_MIRRORS:
+    for host_index, base in enumerate(BASE_MIRRORS):
         url = f"{base}{LIST_PATH}"
         try:
-            return client.get(url, params=params, timeout=timeout)
+            return client.get(
+                url,
+                params=params,
+                timeout=timeout,
+                attempts=None if host_index == 0 else BACKUP_HOST_ATTEMPTS,
+            )
         except ScrapeError as e:
             failures.append(f"{base}: {e}")
-    raise ScrapeError(f"bizinfo HTML page {page} failed on every host: " + " | ".join(failures))
+            errors.append(e)
+    raise ScrapeError(
+        f"bizinfo HTML page {page} failed on every host: " + " | ".join(failures),
+        kind=errors[-1].kind if errors else None,
+        transient=bool(errors) and all(error.transient for error in errors),
+    )
+
+
+def _is_origin_unreachable(error: ScrapeError) -> bool:
+    """Return whether retrying another endpoint on the same origin is wasteful.
+
+    The string fallback keeps compatibility with lightweight fake clients and
+    with any persisted/forwarded errors produced before ``ScrapeError`` gained
+    structured metadata.
+    """
+    if error.kind in _ORIGIN_UNREACHABLE_KINDS:
+        return True
+    message = str(error)
+    return any(kind in message for kind in _ORIGIN_UNREACHABLE_KINDS)
 
 
 def _list_page_timeout() -> float:
@@ -257,9 +337,15 @@ def _fetch_official_api(client: HttpClient, api_key: str) -> list[BizinfoRaw]:
         raise ScrapeError(f"bizinfo API rejected the request: {payload['reqErr']}")
 
     body = payload.get("jsonArray", payload)
-    if not isinstance(body, dict):
-        raise ScrapeError("bizinfo API response has no jsonArray object")
-    records = body.get("item", [])
+    # The current API (confirmed 2026-08-10) returns ``jsonArray`` directly as
+    # a list. Older samples wrapped that list in ``{"item": [...]}``, so keep
+    # both official response shapes compatible.
+    if isinstance(body, list):
+        records = body
+    elif isinstance(body, dict):
+        records = body.get("item", [])
+    else:
+        raise ScrapeError("bizinfo API response has no usable jsonArray payload")
     if isinstance(records, dict):
         records = [records]
     if not isinstance(records, list) or not records:
@@ -278,7 +364,7 @@ def _fetch_official_api(client: HttpClient, api_key: str) -> list[BizinfoRaw]:
         summary = BeautifulSoup(summary_html, "lxml").get_text(" ", strip=True) if summary_html else None
         hashtags = tuple(
             tag.strip().lstrip("#")
-            for tag in _clean(record.get("hashTags")).split(",")
+            for tag in _clean(record.get("hashtags") or record.get("hashTags")).split(",")
             if tag.strip()
         )
         out.append(BizinfoRaw(
@@ -305,6 +391,42 @@ def _fetch_official_api(client: HttpClient, api_key: str) -> list[BizinfoRaw]:
         if total != len(out):
             raise ScrapeError(f"bizinfo API incomplete: expected {total}, received {len(out)}")
     _validate_unique_ids(out, "API")
+    return out
+
+
+def _merge_api_enrichment(
+    excel_items: list[BizinfoRaw],
+    api_items: list[BizinfoRaw],
+) -> list[BizinfoRaw]:
+    """Use Excel's dates/list fields and add richer API-only content."""
+    api_by_id = {item.pblanc_id: item for item in api_items}
+    excel_ids = {item.pblanc_id for item in excel_items}
+    api_ids = set(api_by_id)
+    if excel_ids != api_ids:
+        logger.warning(
+            "bizinfo API/Excel ids differ (api_only=%d, excel_only=%d)",
+            len(api_ids - excel_ids),
+            len(excel_ids - api_ids),
+        )
+
+    out: list[BizinfoRaw] = []
+    for excel_item in excel_items:
+        api_item = api_by_id.get(excel_item.pblanc_id)
+        if api_item is None:
+            out.append(excel_item)
+            continue
+        out.append(BizinfoRaw(
+            pblanc_id=excel_item.pblanc_id,
+            title=excel_item.title,
+            apply_period=excel_item.apply_period,
+            deadline=excel_item.deadline,
+            organizer=excel_item.organizer,
+            executor=excel_item.executor,
+            support_field=excel_item.support_field,
+            summary=api_item.summary,
+            target=api_item.target,
+            hashtags=api_item.hashtags,
+        ))
     return out
 
 

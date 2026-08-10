@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import date
 
@@ -37,21 +38,42 @@ class SourceReport:
     cached_snapshot_date: date | None = None
 
     @property
+    def error_summary(self) -> str:
+        """Short, recipient-safe cause; ``error`` retains full diagnostics."""
+        error = " ".join((self.error or "원인 미상").split())
+        if "Temporary failure in name resolution" in error or "ConnectError" in error:
+            return "DNS 또는 네트워크 연결 실패"
+        if "ConnectTimeout" in error:
+            return "연결 시간 초과"
+        if "ReadTimeout" in error:
+            return "응답 시간 초과"
+        if "incomplete pagination" in error:
+            match = re.search(r"\((\d+) items collected\)", error)
+            count = f" ({match.group(1)}건 수집)" if match else ""
+            return f"페이지네이션 불완전{count}"
+        if "list page structure was not recognized" in error:
+            return "목록 페이지 구조 변경 감지"
+        return error if len(error) <= 180 else f"{error[:177]}..."
+
+    @property
     def warning(self) -> str | None:
         if self.status == "fresh":
             return None
         if self.status == "static":
             return None
         if self.status == "fallback":
-            suffix = (
-                f" ({self.cached_snapshot_date.isoformat()} 스냅샷)"
-                if self.cached_snapshot_date else ""
+            cache_label = (
+                f"{self.cached_snapshot_date.isoformat()} 스냅샷"
+                if self.cached_snapshot_date else "최근 정상 캐시"
             )
             return (
-                f"{self.source_key}: 수집 실패로 캐시 데이터 사용{suffix}: "
-                f"{self.error or '원인 미상'}"
+                f"{self.source_key}: 수집 실패 — {cache_label} "
+                f"{self.item_count}건 사용 ({self.error_summary})"
             )
-        return f"{self.source_key}: 수집 실패 및 사용 가능한 캐시 없음: {self.error or '원인 미상'}"
+        return (
+            f"{self.source_key}: 수집 실패 및 사용 가능한 캐시 없음 "
+            f"({self.error_summary})"
+        )
 
     def as_dict(self) -> dict:
         return {
@@ -59,6 +81,7 @@ class SourceReport:
             "status": self.status,
             "item_count": self.item_count,
             "error": self.error,
+            "error_summary": self.error_summary,
             "cached_snapshot_date": (
                 self.cached_snapshot_date.isoformat() if self.cached_snapshot_date else None
             ),

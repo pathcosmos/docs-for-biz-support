@@ -40,6 +40,7 @@ class NtisRaw:
 class NtisListResult:
     items: list[NtisRaw]
     complete: bool
+    failure_reason: str | None = None
 
 
 def fetch_listings(client: HttpClient) -> NtisListResult:
@@ -59,13 +60,21 @@ def fetch_listings(client: HttpClient) -> NtisListResult:
             if not out:
                 raise
             logger.warning("NTIS page %d failed after %d items: %s", page, len(out), exc)
-            return NtisListResult(items=out, complete=False)
+            return NtisListResult(
+                items=out,
+                complete=False,
+                failure_reason=f"page {page} request failed after {len(out)} items: {exc}",
+            )
 
         rows, parsed_total, valid_page = _parse_list_page(html)
         if not valid_page:
             if not out:
                 raise ScrapeError("NTIS: list page structure was not recognized")
-            return NtisListResult(items=out, complete=False)
+            return NtisListResult(
+                items=out,
+                complete=False,
+                failure_reason=f"page {page} structure was not recognized",
+            )
 
         if total_count is None:
             total_count = parsed_total
@@ -75,7 +84,14 @@ def fetch_listings(client: HttpClient) -> NtisListResult:
                 total_count,
                 parsed_total,
             )
-            return NtisListResult(items=out, complete=False)
+            return NtisListResult(
+                items=out,
+                complete=False,
+                failure_reason=(
+                    f"result count changed during pagination "
+                    f"({total_count} -> {parsed_total})"
+                ),
+            )
 
         for row in rows:
             if row.rnd_uid not in seen:
@@ -84,7 +100,14 @@ def fetch_listings(client: HttpClient) -> NtisListResult:
 
         total_pages = max(1, math.ceil(total_count / PAGE_SIZE))
         if not rows and total_count > len(out):
-            return NtisListResult(items=out, complete=False)
+            return NtisListResult(
+                items=out,
+                complete=False,
+                failure_reason=(
+                    f"page {page} contained no parseable rows; "
+                    f"expected {total_count}, collected {len(out)}"
+                ),
+            )
         if page >= total_pages:
             complete = len(out) == total_count
             if not complete:
@@ -93,10 +116,21 @@ def fetch_listings(client: HttpClient) -> NtisListResult:
                     total_count,
                     len(out),
                 )
-            return NtisListResult(items=out, complete=complete)
+            return NtisListResult(
+                items=out,
+                complete=complete,
+                failure_reason=(
+                    None if complete else
+                    f"pagination count mismatch: expected {total_count}, collected {len(out)}"
+                ),
+            )
 
     logger.warning("NTIS hit MAX_PAGES=%d", MAX_PAGES)
-    return NtisListResult(items=out, complete=False)
+    return NtisListResult(
+        items=out,
+        complete=False,
+        failure_reason=f"reached MAX_PAGES={MAX_PAGES} after {len(out)} items",
+    )
 
 
 def _parse_list_page(html: str) -> tuple[list[NtisRaw], int, bool]:
