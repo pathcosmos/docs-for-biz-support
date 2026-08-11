@@ -5,12 +5,14 @@
 
 ## 운영 흐름
 
-1. `daily.yml`의 `scrape` 작업이 각 소스를 수집합니다.
-2. 소스별 성공·캐시 폴백 상태를 검증하고 Turso에 완성 스냅샷을 기록합니다.
-3. `mail` 작업은 같은 KST 날짜의 완성 스냅샷만 읽습니다.
-4. 5개 아카이브 저장소에 날짜 HTML·`archive.json`·`index.html`을 푸시합니다.
-5. 날짜별 GitHub Pages URL의 게시 내용을 확인한 뒤 Gmail SMTP로 발송합니다.
-6. SMTP `Message-ID`를 Turso와 `state/sent-YYYY-MM-DD.marker`에 기록합니다.
+1. `daily.yml`이 Ubuntu에서 기업마당 공식 API 응답을 먼저 검증합니다.
+2. Azure 연결이 실패하면 macOS 러너가 다른 네트워크에서 API 수집을 대신합니다.
+3. 키가 포함되지 않은 검증 완료 응답을 `scrape` 작업에 전달해 각 소스를 수집합니다.
+4. 소스별 성공·캐시 폴백 상태를 검증하고 Turso에 완성 스냅샷을 기록합니다.
+5. `mail` 작업은 같은 KST 날짜의 완성 스냅샷만 읽습니다.
+6. 5개 아카이브 저장소에 날짜 HTML·`archive.json`·`index.html`을 푸시합니다.
+7. 날짜별 GitHub Pages URL의 게시 내용을 확인한 뒤 Gmail SMTP로 발송합니다.
+8. SMTP `Message-ID`를 Turso와 `state/sent-YYYY-MM-DD.marker`에 기록합니다.
 
 ## 아카이브와 소스
 
@@ -47,10 +49,12 @@ uv run --frozen ruff check src tests
 운영 환경 변수는 `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, `GMAIL_USER`,
 `GMAIL_APP_PASSWORD`, `MAIL_TO`, `MAIL_CC_GOV_SUPPORT`,
 `ARCHIVE_PUSH_TOKEN`입니다. 기업마당에서 발급받은 `BIZINFO_API_KEY`를 추가하면
-공식 JSON API만 사용하며, 연결 장애 때도 같은 API를 장시간 재시도합니다. 키가
-없는 로컬 환경에서만 공식 전체 엑셀 다운로드와 HTML 목록을 예비 경로로
-사용합니다. GitHub Actions에서는 키가 필수이며 누락 시 캐시로 안전하게
-전환합니다. 실제 비밀값은 GitHub Actions secrets에만 둡니다.
+공식 JSON API만 사용합니다. 정기 작업은 Ubuntu에서 짧게 연결을 확인하고 실패하면
+GitHub의 macOS 네트워크에서 재수집합니다. 두 경로가 모두 실패할 때만 캐시로
+전환합니다. 수동 `scrape.yml`도 검증된 macOS 경로를 사용합니다. 키가 없는 로컬
+환경에서만 공식 전체 엑셀 다운로드와 HTML 목록을 예비 경로로 사용합니다.
+실제 비밀값은 GitHub Actions secrets에만 두며 러너 사이에는 키가 아니라 검증된
+공개 API 응답만 전달합니다.
 
 기존 기업마당 데이터의 API 요약·지원대상·해시태그·GPU·AI 라벨을 갱신하려면
 `python -m src.cli --backfill-bizinfo-api`를 사용합니다.

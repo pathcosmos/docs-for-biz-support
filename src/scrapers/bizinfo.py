@@ -30,6 +30,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass
 from datetime import date
+from pathlib import Path
 from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup, Tag
@@ -123,6 +124,10 @@ _REGION_HASHTAGS = {
 
 def fetch_listings(client: HttpClient) -> BizinfoListResult:
     """Fetch a complete list through the authenticated API when configured."""
+    artifact_path = os.environ.get("BIZINFO_API_PAYLOAD_PATH", "").strip()
+    if artifact_path:
+        return _fetch_official_api_artifact(Path(artifact_path))
+
     list_page_timeout = _list_page_timeout()
     api_key = os.environ.get("BIZINFO_API_KEY", "").strip()
     if api_key:
@@ -413,12 +418,69 @@ def _fetch_official_api(
     timeout: float = LIST_PAGE_TIMEOUT,
     attempts: int | None = None,
 ) -> list[BizinfoRaw]:
-    text = client.get(
+    text = _get_official_api_payload(
+        client,
+        api_key,
+        timeout=timeout,
+        attempts=attempts,
+    )
+    return _parse_official_api_payload(text)
+
+
+def fetch_official_api_payload(
+    client: HttpClient,
+    api_key: str,
+    *,
+    timeout: float | None = None,
+    attempts: int = 1,
+) -> tuple[str, int]:
+    """Fetch and validate one API response for cross-runner handoff.
+
+    The returned payload contains only Bizinfo's public response data; the
+    service key is a request parameter and is never written to the artifact.
+    """
+    if not api_key.strip():
+        raise ScrapeError("BIZINFO_API_KEY is required for API artifact collection")
+    request_timeout = _list_page_timeout() if timeout is None else timeout
+    text = _get_official_api_payload(
+        client,
+        api_key,
+        timeout=request_timeout,
+        attempts=attempts,
+    )
+    items = _parse_official_api_payload(text)
+    return text, len(items)
+
+
+def _get_official_api_payload(
+    client: HttpClient,
+    api_key: str,
+    *,
+    timeout: float,
+    attempts: int | None,
+) -> str:
+    return client.get(
         f"{BASE}{API_PATH}",
         params={"crtfcKey": api_key, "dataType": "json", "searchCnt": 0},
         timeout=timeout,
         attempts=attempts,
     )
+
+
+def _fetch_official_api_artifact(path: Path) -> BizinfoListResult:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise ScrapeError(
+            "bizinfo API artifact unavailable after Ubuntu and macOS collection attempts: "
+            f"{error}",
+        ) from error
+    items = _parse_official_api_payload(text)
+    logger.info("bizinfo: %d items loaded from validated API artifact", len(items))
+    return BizinfoListResult(items=items, complete=True, channel="api")
+
+
+def _parse_official_api_payload(text: str) -> list[BizinfoRaw]:
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as e:

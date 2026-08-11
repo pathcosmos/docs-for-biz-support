@@ -47,6 +47,8 @@ class SourceReport:
             return "연결 시간 초과"
         if "ReadTimeout" in error:
             return "응답 시간 초과"
+        if "API artifact unavailable after Ubuntu and macOS" in error:
+            return "Ubuntu·macOS API 수집 실패"
         if "incomplete pagination" in error:
             match = re.search(r"\((\d+) items collected\)", error)
             count = f" ({match.group(1)}건 수집)" if match else ""
