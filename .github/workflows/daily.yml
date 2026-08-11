@@ -157,7 +157,11 @@ jobs:
 
   mail:
     needs: scrape
-    if: ${{ needs.scrape.result == 'success' && inputs.dry_run != true }}
+    # `scrape` deliberately uses `always()` because one of the two Bizinfo
+    # fetch jobs is normally skipped. Carry that recovered-success semantics
+    # forward; otherwise GitHub's implicit `success()` skips mail when the
+    # Ubuntu fetch was skipped and the macOS fallback succeeded.
+    if: ${{ always() && needs.scrape.result == 'success' && inputs.dry_run != true }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
