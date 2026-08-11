@@ -21,6 +21,10 @@ on:
         description: 'Send without government-support CC recipients'
         type: boolean
         default: false
+      force_macos_bizinfo:
+        description: 'Skip Ubuntu Bizinfo fetch and verify the macOS fallback path'
+        type: boolean
+        default: false
 
 concurrency:
   group: daily-pipeline
@@ -31,7 +35,9 @@ jobs:
   # TCP connections from some Azure regions, so collect and validate its
   # public API response separately before the main scrape.
   bizinfo-ubuntu:
-    if: ${{ github.event_name == 'schedule' || inputs.only == '' || inputs.only == 'gov-support' }}
+    if: >-
+      ${{ (github.event_name == 'schedule' || inputs.only == '' || inputs.only == 'gov-support')
+          && inputs.force_macos_bizinfo != true }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -74,7 +80,8 @@ jobs:
     if: >-
       ${{ always()
           && (github.event_name == 'schedule' || inputs.only == '' || inputs.only == 'gov-support')
-          && needs.bizinfo-ubuntu.outputs.collected != 'true' }}
+          && (inputs.force_macos_bizinfo == true
+              || needs.bizinfo-ubuntu.outputs.collected != 'true') }}
     runs-on: macos-latest
     timeout-minutes: 15
     outputs:
