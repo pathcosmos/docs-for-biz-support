@@ -1,6 +1,6 @@
 name: scrape (manual maintenance)
 
-# Emergency re-scrape and one-shot detail backfill. The daily schedule lives in
+# Emergency re-scrape and one-shot API backfill. The daily schedule lives in
 # daily.yml so mail cannot start independently of a successful scrape.
 
 on:
@@ -15,11 +15,11 @@ on:
         type: boolean
         default: false
       backfill_details:
-        description: 'One-shot: fetch DETAIL pages for every existing bizinfo item, re-apply GPU·AI labels (~25 min). Bypasses normal scrape.'
+        description: 'One-shot: refresh existing bizinfo enrichment and GPU·AI labels from the keyed official API. Bypasses normal scrape.'
         type: boolean
         default: false
       bizinfo_timeout:
-        description: 'Diagnostic only: override Bizinfo per-attempt timeout in seconds (1-120)'
+        description: 'Override Bizinfo per-attempt timeout in seconds (1-900; default 300)'
         type: string
         default: ''
 
@@ -33,9 +33,9 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    # 30 min normally; backfill can run ~25 min in the worst case, so we
-    # add headroom. Daily cron doesn't need the full window.
-    timeout-minutes: 45
+    # At the maximum manual 900-second request timeout, Bizinfo can spend
+    # roughly 165 minutes in extended recovery. Keep generous headroom.
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
 
@@ -61,8 +61,8 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${BACKFILL_DETAILS:-false}" = "true" ]; then
-            # One-shot detail backfill — bypasses scrape stage entirely
-            uv run --frozen python -m src.cli --backfill-details
+            # Historical input/CLI name retained; implementation is API-only.
+            uv run --frozen python -m src.cli --backfill-bizinfo-api
           else
             args=(--scrape)
             [ "${DRY_RUN:-false}" = "true" ] && args+=(--dry-run)

@@ -47,8 +47,13 @@ uv run --frozen ruff check src tests
 운영 환경 변수는 `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, `GMAIL_USER`,
 `GMAIL_APP_PASSWORD`, `MAIL_TO`, `MAIL_CC_GOV_SUPPORT`,
 `ARCHIVE_PUSH_TOKEN`입니다. 기업마당에서 발급받은 `BIZINFO_API_KEY`를 추가하면
-공식 JSON API를 최우선으로 사용합니다. 키가 없어도 공식 전체 엑셀 다운로드와
-HTML 목록을 순서대로 사용합니다. 실제 비밀값은 GitHub Actions secrets에만 둡니다.
+공식 JSON API만 사용하며, 연결 장애 때도 같은 API를 장시간 재시도합니다. 키가
+없는 로컬 환경에서만 공식 전체 엑셀 다운로드와 HTML 목록을 예비 경로로
+사용합니다. GitHub Actions에서는 키가 필수이며 누락 시 캐시로 안전하게
+전환합니다. 실제 비밀값은 GitHub Actions secrets에만 둡니다.
+
+기존 기업마당 데이터의 API 요약·지원대상·해시태그·GPU·AI 라벨을 갱신하려면
+`python -m src.cli --backfill-bizinfo-api`를 사용합니다.
 
 수동 복구는 `scrape.yml`과 `mail.yml`의 `workflow_dispatch`로 실행하며, 정기
 스케줄은 중복 방지를 위해 `daily.yml`에만 있습니다.

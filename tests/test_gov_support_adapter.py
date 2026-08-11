@@ -109,6 +109,50 @@ def test_complete_fetch_is_used_as_is_no_fallback(tmp_path, monkeypatch):
     assert "bizinfo:PBLN_000000000999999" not in ids
 
 
+def test_keyed_api_result_never_fetches_legacy_detail_html(monkeypatch):
+    api_result = BizinfoListResult(
+        items=[
+            BizinfoRaw(
+                pblanc_id="PBLN_000000000333333",
+                title="API 전용 공고",
+                apply_period="2026-08-01 ~ 2026-08-31",
+                deadline=date.fromisoformat("2026-08-31"),
+                organizer="중소벤처기업부",
+                executor="전담기관",
+                support_field="기술",
+                summary="API가 제공한 요약",
+                target="중소기업",
+                hashtags=("AI", "부산"),
+                detail_url=(
+                    "https://www.bizinfo.go.kr/web/lay1/bbs/S1T122C128/AS/74/"
+                    "view.do?pblancId=PBLN_000000000333333"
+                ),
+                region="부산",
+            ),
+        ],
+        complete=True,
+        channel="api",
+    )
+    monkeypatch.setattr(gov_support, "fetch_bizinfo", lambda client: api_result)
+    monkeypatch.setattr(gov_support, "fetch_nipa", lambda client: [])
+    monkeypatch.setattr(
+        gov_support,
+        "bizinfo_fetch_detail",
+        lambda client, pblanc_id: (_ for _ in ()).throw(
+            AssertionError("API collection must not fetch DETAIL HTML")
+        ),
+    )
+
+    result = gov_support.fetch_result()
+
+    item = next(item for item in result.items if item.source_key == "bizinfo")
+    assert item.summary == "API가 제공한 요약"
+    assert item.target == "중소기업"
+    assert item.region == "부산"
+    assert item.category == "기술"
+    assert item.detail_url.endswith("pblancId=PBLN_000000000333333")
+
+
 def test_nipa_failure_uses_cache_and_surfaces_warning(tmp_path, monkeypatch):
     client = _isolated_db(tmp_path, monkeypatch)
     item = db._item_from_db_row((

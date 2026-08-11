@@ -429,8 +429,8 @@ def backfill_item_enrichment(
     don't blank out, e.g., a region that detail-page parsing happened to
     miss but the LIST page had.
 
-    Used by `cli.py --backfill-details` to populate GPU·AI badges on legacy
-    items that were originally stored from list pages only."""
+    Used by `cli.py --backfill-bizinfo-api` to populate API-derived enrichment
+    and GPU·AI badges on legacy items."""
     client.execute(
         "UPDATE item SET "
         "badges_json = ?, "

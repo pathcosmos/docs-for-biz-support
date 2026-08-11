@@ -1,12 +1,11 @@
 """기업마당 (bizinfo.go.kr) support-program scraper.
 
-Collection order:
+Collection policy:
 
-1. Authenticated official JSON API when ``BIZINFO_API_KEY`` is configured.
-2. Public official Excel download, which returns authoritative application
-   dates for the same complete list in one request. When both succeed, Excel
-   supplies list/date fields and the API supplies summary/target/hashtags.
-3. The paginated HTML list on both ``www`` and bare hosts.
+1. When ``BIZINFO_API_KEY`` is configured, use only the authenticated official
+   JSON API, including every extended outage-recovery probe.
+2. Public Excel and paginated HTML remain legacy fallbacks only for local
+   environments where no API key is configured.
 
 The HTML path remains a last live fallback. Each page is server-rendered with
 a single `<table>` inside `<div class="table_Type_1">` and 8 columns:
@@ -31,6 +30,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass
 from datetime import date
+from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup, Tag
 
@@ -46,13 +46,18 @@ EXCEL_PATH = "/sii/siia/selectSIIA200ExcelDownload.do"
 API_PATH = "/uss/rss/bizinfoApi.do"
 MAX_PAGES = 200    # 15/page × 200 = 3000 ceiling — plenty
 
-# GitHub-hosted runner measurements on 2026-08-08 established a clear boundary:
-# every 10-second connection attempt timed out, while otherwise-identical
-# 20-second and 30-second dry runs both completed a fresh 1,572-item aggregate
-# without cache fallback. Keep 50% headroom over the measured success boundary.
-LIST_PAGE_TIMEOUT = 30.0
-MAX_LIST_PAGE_TIMEOUT = 120.0
-OUTAGE_RETRY_DELAY_SECONDS = 30.0
+# Bizinfo occasionally leaves GitHub-hosted runners waiting at TCP connect for
+# several minutes. Fresh data is more important here than a fast daily run, so
+# allow each official API request to wait up to five minutes.
+LIST_PAGE_TIMEOUT = 300.0
+MAX_LIST_PAGE_TIMEOUT = 900.0
+
+# A longer socket timeout alone cannot recover an origin that is temporarily
+# black-holed. Spread additional one-request API probes across a recovery
+# window that can last roughly 60 minutes including the request waits.
+OUTAGE_RETRY_DELAY_SECONDS = 300.0
+OUTAGE_RECOVERY_ROUNDS = 6
+OUTAGE_RECOVERY_REQUEST_ATTEMPTS = 1
 BACKUP_HOST_ATTEMPTS = 1
 
 _ORIGIN_UNREACHABLE_KINDS = {
@@ -82,6 +87,8 @@ class BizinfoRaw:
     summary: str | None = None
     target: str | None = None
     hashtags: tuple[str, ...] = ()
+    detail_url: str | None = None
+    region: str | None = None
 
 
 _DATE_RE = re.compile(r"(\d{4})[-./]?(\d{2})[-./]?(\d{2})")
@@ -91,56 +98,130 @@ _EXCEL_HEADERS = {
     "소관부처", "사업수행기관", "지원분야", "공고명",
     "신청시작일자", "신청종료일자", "공고상세URL",
 }
+_REGION_HASHTAGS = {
+    "전국": "전국",
+    "서울": "서울",
+    "부산": "부산",
+    "대구": "대구",
+    "인천": "인천",
+    "전남광주": "광주·전남",
+    "광주": "광주",
+    "전남": "전남",
+    "대전": "대전",
+    "울산": "울산",
+    "세종": "세종",
+    "경기": "경기",
+    "강원": "강원",
+    "충북": "충북",
+    "충남": "충남",
+    "전북": "전북",
+    "경북": "경북",
+    "경남": "경남",
+    "제주": "제주",
+}
 
 
 def fetch_listings(client: HttpClient) -> BizinfoListResult:
-    """Fetch a complete list through the strongest available official path."""
-    failures: list[str] = []
-    live_errors: list[ScrapeError] = []
-    api_items: list[BizinfoRaw] | None = None
+    """Fetch a complete list through the authenticated API when configured."""
     list_page_timeout = _list_page_timeout()
-
     api_key = os.environ.get("BIZINFO_API_KEY", "").strip()
     if api_key:
-        try:
-            items = _fetch_official_api(client, api_key)
-        except ScrapeError as e:
-            failures.append(f"api: {e}")
-            logger.warning("bizinfo official API failed, trying Excel: %s", e)
-        else:
-            logger.info("bizinfo: %d items collected through official API", len(items))
-            api_items = items
-    elif os.environ.get("GITHUB_ACTIONS") == "true":
-        logger.warning(
-            "bizinfo official API disabled: BIZINFO_API_KEY is not configured",
+        return _fetch_api_with_recovery(client, api_key, timeout=list_page_timeout)
+
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        raise ScrapeError(
+            "BIZINFO_API_KEY is required for Bizinfo collection in GitHub Actions",
         )
+    return _fetch_legacy_listings(client, timeout=list_page_timeout)
+
+
+def _fetch_api_with_recovery(
+    client: HttpClient,
+    api_key: str,
+    *,
+    timeout: float,
+) -> BizinfoListResult:
+    """Use only the keyed official API and retry it over the outage window."""
+    failures: list[ScrapeError] = []
+
+    try:
+        items = _fetch_official_api(client, api_key, timeout=timeout)
+    except ScrapeError as error:
+        failures.append(error)
+        if not _is_origin_unreachable(error):
+            raise ScrapeError(
+                f"bizinfo official API failed: {error}",
+                kind=error.kind,
+                transient=error.transient,
+            ) from error
+        logger.warning(
+            "bizinfo official API origin unreachable; starting extended recovery: %s",
+            error,
+        )
+    else:
+        logger.info("bizinfo: %d items collected through official API", len(items))
+        return BizinfoListResult(items=items, complete=True, channel="api")
+
+    for recovery_round in range(1, OUTAGE_RECOVERY_ROUNDS + 1):
+        logger.warning(
+            "bizinfo API recovery probe %d/%d after %.0fs",
+            recovery_round,
+            OUTAGE_RECOVERY_ROUNDS,
+            OUTAGE_RETRY_DELAY_SECONDS,
+        )
+        time.sleep(OUTAGE_RETRY_DELAY_SECONDS)
+        try:
+            items = _fetch_official_api(
+                client,
+                api_key,
+                timeout=timeout,
+                attempts=OUTAGE_RECOVERY_REQUEST_ATTEMPTS,
+            )
+        except ScrapeError as error:
+            failures.append(error)
+            logger.warning(
+                "bizinfo API recovery probe %d/%d failed: %s",
+                recovery_round,
+                OUTAGE_RECOVERY_ROUNDS,
+                error,
+            )
+            if not _is_origin_unreachable(error):
+                break
+        else:
+            logger.info(
+                "bizinfo: %d items collected through official API on recovery probe %d",
+                len(items),
+                recovery_round,
+            )
+            return BizinfoListResult(items=items, complete=True, channel="api")
+
+    last_error = failures[-1]
+    raise ScrapeError(
+        "bizinfo official API unavailable after extended recovery "
+        f"({len(failures)} failed rounds; last error: {last_error})",
+        kind=last_error.kind,
+        transient=all(error.transient for error in failures),
+    ) from last_error
+
+
+def _fetch_legacy_listings(
+    client: HttpClient,
+    *,
+    timeout: float,
+) -> BizinfoListResult:
+    """Use unkeyed Excel/HTML paths only when no API key is configured."""
+    failures: list[str] = []
+    live_errors: list[ScrapeError] = []
 
     excel_result = _fetch_excel_from_hosts(
         client,
         failures,
         live_errors,
         label="excel",
-        timeout=list_page_timeout,
-        hosts=(BASE,) if api_items is not None else BASE_MIRRORS,
-        primary_attempts=1 if api_items is not None else None,
+        timeout=timeout,
     )
     if excel_result:
-        if api_items is not None:
-            merged = _merge_api_enrichment(excel_result.items, api_items)
-            logger.info(
-                "bizinfo: %d Excel items enriched through official API", len(merged),
-            )
-            return BizinfoListResult(items=merged, complete=True, channel="api+excel")
         return excel_result
-    if api_items is not None:
-        # The API result has already passed total-count and unique-ID checks.
-        # Prefer it to stale cache if the optional Excel date enrichment is
-        # unavailable; textual periods may be less precise, but the live list
-        # itself remains complete.
-        logger.warning(
-            "bizinfo Excel date enrichment failed; using complete API result",
-        )
-        return BizinfoListResult(items=api_items, complete=True, channel="api")
 
     excel_errors = live_errors.copy()
     origin_unreachable = (
@@ -158,31 +239,35 @@ def fetch_listings(client: HttpClient) -> BizinfoListResult:
         )
     else:
         try:
-            return _fetch_html_listings(client, timeout=list_page_timeout)
+            return _fetch_html_listings(client, timeout=timeout)
         except ScrapeError as e:
             failures.append(f"html: {e}")
             live_errors.append(e)
 
     # A connection timeout or DNS failure means the shared origin was
-    # temporarily unreachable. One delayed Excel retry gives that origin time
-    # to recover. Parse/schema failures are deterministic and should fall back
-    # to cache immediately instead.
+    # temporarily unreachable. Keep probing over a longer recovery window;
+    # scheduled delivery is allowed to wait for fresh data. Parse/schema
+    # failures are deterministic and should fall back to cache immediately.
     if any(_is_origin_unreachable(error) for error in live_errors):
-        logger.warning(
-            "bizinfo origin unreachable; retrying Excel after %.0fs",
-            OUTAGE_RETRY_DELAY_SECONDS,
-        )
-        time.sleep(OUTAGE_RETRY_DELAY_SECONDS)
-        excel_result = _fetch_excel_from_hosts(
-            client,
-            failures,
-            live_errors,
-            label="delayed excel",
-            timeout=list_page_timeout,
-            hosts=(BASE,),
-        )
-        if excel_result:
-            return excel_result
+        for recovery_round in range(1, OUTAGE_RECOVERY_ROUNDS + 1):
+            logger.warning(
+                "bizinfo origin unreachable; recovery probe %d/%d after %.0fs",
+                recovery_round,
+                OUTAGE_RECOVERY_ROUNDS,
+                OUTAGE_RETRY_DELAY_SECONDS,
+            )
+            time.sleep(OUTAGE_RETRY_DELAY_SECONDS)
+            excel_result = _fetch_excel_from_hosts(
+                client,
+                failures,
+                live_errors,
+                label=f"recovery excel {recovery_round}/{OUTAGE_RECOVERY_ROUNDS}",
+                timeout=timeout,
+                hosts=(BASE,),
+                primary_attempts=OUTAGE_RECOVERY_REQUEST_ATTEMPTS,
+            )
+            if excel_result:
+                return excel_result
 
     raise ScrapeError("bizinfo all live collection paths failed: " + " | ".join(failures))
 
@@ -321,10 +406,18 @@ def _list_page_timeout() -> float:
     return value
 
 
-def _fetch_official_api(client: HttpClient, api_key: str) -> list[BizinfoRaw]:
+def _fetch_official_api(
+    client: HttpClient,
+    api_key: str,
+    *,
+    timeout: float = LIST_PAGE_TIMEOUT,
+    attempts: int | None = None,
+) -> list[BizinfoRaw]:
     text = client.get(
         f"{BASE}{API_PATH}",
         params={"crtfcKey": api_key, "dataType": "json", "searchCnt": 0},
+        timeout=timeout,
+        attempts=attempts,
     )
     try:
         payload = json.loads(text)
@@ -367,6 +460,10 @@ def _fetch_official_api(client: HttpClient, api_key: str) -> list[BizinfoRaw]:
             for tag in _clean(record.get("hashtags") or record.get("hashTags")).split(",")
             if tag.strip()
         )
+        official_detail_url = _validated_api_detail_url(
+            _clean(record.get("pblancUrl") or record.get("link")),
+            pblanc_id,
+        )
         out.append(BizinfoRaw(
             pblanc_id=pblanc_id,
             title=title,
@@ -380,6 +477,8 @@ def _fetch_official_api(client: HttpClient, api_key: str) -> list[BizinfoRaw]:
             summary=summary,
             target=_clean(record.get("trgetNm")) or None,
             hashtags=hashtags,
+            detail_url=official_detail_url,
+            region=_region_from_hashtags(hashtags),
         ))
 
     total_raw = records[0].get("totCnt") if isinstance(records[0], dict) else None
@@ -394,40 +493,27 @@ def _fetch_official_api(client: HttpClient, api_key: str) -> list[BizinfoRaw]:
     return out
 
 
-def _merge_api_enrichment(
-    excel_items: list[BizinfoRaw],
-    api_items: list[BizinfoRaw],
-) -> list[BizinfoRaw]:
-    """Use Excel's dates/list fields and add richer API-only content."""
-    api_by_id = {item.pblanc_id: item for item in api_items}
-    excel_ids = {item.pblanc_id for item in excel_items}
-    api_ids = set(api_by_id)
-    if excel_ids != api_ids:
-        logger.warning(
-            "bizinfo API/Excel ids differ (api_only=%d, excel_only=%d)",
-            len(api_ids - excel_ids),
-            len(excel_ids - api_ids),
-        )
+def _validated_api_detail_url(candidate: str, pblanc_id: str) -> str:
+    parsed = urlparse(candidate)
+    if parsed.scheme == "https" and parsed.hostname in {
+        "www.bizinfo.go.kr",
+        "bizinfo.go.kr",
+    }:
+        return candidate
+    return detail_url(pblanc_id)
 
-    out: list[BizinfoRaw] = []
-    for excel_item in excel_items:
-        api_item = api_by_id.get(excel_item.pblanc_id)
-        if api_item is None:
-            out.append(excel_item)
-            continue
-        out.append(BizinfoRaw(
-            pblanc_id=excel_item.pblanc_id,
-            title=excel_item.title,
-            apply_period=excel_item.apply_period,
-            deadline=excel_item.deadline,
-            organizer=excel_item.organizer,
-            executor=excel_item.executor,
-            support_field=excel_item.support_field,
-            summary=api_item.summary,
-            target=api_item.target,
-            hashtags=api_item.hashtags,
-        ))
-    return out
+
+def _region_from_hashtags(hashtags: tuple[str, ...]) -> str | None:
+    regions = list(dict.fromkeys(
+        _REGION_HASHTAGS[tag]
+        for tag in hashtags
+        if tag in _REGION_HASHTAGS
+    ))
+    if not regions:
+        return None
+    if "전국" in regions:
+        return "전국"
+    return ", ".join(regions)
 
 
 def _parse_excel(payload: bytes) -> list[BizinfoRaw]:
