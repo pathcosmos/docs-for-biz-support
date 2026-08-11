@@ -12,6 +12,7 @@ from src.scrapers.base import HttpClient, ScrapeError
 @pytest.fixture(autouse=True)
 def _disable_real_api_key(monkeypatch):
     monkeypatch.delenv("BIZINFO_API_KEY", raising=False)
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
 
 
 def _page_html(pblanc_ids: list[str]) -> str:
@@ -110,12 +111,16 @@ def test_official_api_parser_validates_total_and_keeps_enrichment(response_shape
         "bsnsSumryCn": "<div>인공지능 사업화 지원</div>",
         "trgetNm": "중소기업",
         "totCnt": "1",
+        "pblancUrl": (
+            "https://www.bizinfo.go.kr/web/lay1/bbs/S1T122C128/AS/74/"
+            "view.do?pblancId=PBLN_000000000000888"
+        ),
     }
     record["hashtags" if response_shape == "current-list" else "hashTags"] = "AI,부산"
     json_array = [record] if response_shape == "current-list" else {"item": [record]}
 
     class ApiClient:
-        def get(self, url, params=None, timeout=None):
+        def get(self, url, params=None, timeout=None, attempts=None):
             return json.dumps({
                 "jsonArray": json_array,
             })
@@ -127,29 +132,51 @@ def test_official_api_parser_validates_total_and_keeps_enrichment(response_shape
     assert items[0].summary == "인공지능 사업화 지원"
     assert items[0].target == "중소기업"
     assert items[0].hashtags == ("AI", "부산")
+    assert items[0].region == "부산"
+    assert items[0].detail_url.endswith("pblancId=PBLN_000000000000888")
 
 
-def test_fetch_listings_merges_api_enrichment_with_excel_dates(monkeypatch):
+def test_github_actions_requires_api_key(monkeypatch):
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+
+    class NoRequestClient:
+        def get(self, *args, **kwargs):
+            raise AssertionError("missing-key production path must not make a request")
+
+        def get_bytes(self, *args, **kwargs):
+            raise AssertionError("missing-key production path must not use Excel")
+
+    with pytest.raises(ScrapeError, match="BIZINFO_API_KEY is required"):
+        bizinfo.fetch_listings(NoRequestClient())
+
+
+def test_api_detail_url_rejects_non_bizinfo_host():
+    pblanc_id = "PBLN_000000000000888"
+
+    assert bizinfo._validated_api_detail_url(
+        "https://example.com/redirect", pblanc_id,
+    ) == bizinfo.detail_url(pblanc_id)
+
+
+def test_fetch_listings_with_key_uses_only_official_api(monkeypatch):
     monkeypatch.setenv("BIZINFO_API_KEY", "configured-test-key")
     pblanc_id = "PBLN_000000000000889"
-    excel = _xlsx_bytes([[
-        "1", "중소벤처기업부", "전담기관", "기술", "API 병합 공고",
-        "2026-08-01", "2026-08-31", "2026-08-02",
-        f"https://www.bizinfo.go.kr/x?pblancId={pblanc_id}",
-    ]])
 
-    class ApiAndExcelClient:
+    class ApiOnlyClient:
         def __init__(self):
-            self.excel_attempts: list[int | None] = []
+            self.api_timeouts: list[float | None] = []
+            self.api_attempts: list[int | None] = []
 
-        def get(self, url, params=None, timeout=None):
+        def get(self, url, params=None, timeout=None, attempts=None):
+            self.api_timeouts.append(timeout)
+            self.api_attempts.append(attempts)
             return json.dumps({"jsonArray": [{
                 "pblancId": pblanc_id,
-                "pblancNm": "API 병합 공고",
+                "pblancNm": "API 전용 공고",
                 "jrsdInsttNm": "중소벤처기업부",
                 "excInsttNm": "전담기관",
                 "pldirSportRealmLclasCodeNm": "기술",
-                "reqstBeginEndDe": "상시 접수",
+                "reqstBeginEndDe": "20260801 ~ 20260831",
                 "bsnsSumryCn": "API 사업 요약",
                 "trgetNm": "중소기업",
                 "hashtags": "AI,부산",
@@ -157,14 +184,13 @@ def test_fetch_listings_merges_api_enrichment_with_excel_dates(monkeypatch):
             }]})
 
         def get_bytes(self, url, params=None, timeout=None, attempts=None):
-            self.excel_attempts.append(attempts)
-            return excel
+            raise AssertionError("keyed collection must not use Excel")
 
-    client = ApiAndExcelClient()
+    client = ApiOnlyClient()
 
     result = bizinfo.fetch_listings(client)
 
-    assert result.channel == "api+excel"
+    assert result.channel == "api"
     assert result.complete is True
     assert len(result.items) == 1
     item = result.items[0]
@@ -173,38 +199,47 @@ def test_fetch_listings_merges_api_enrichment_with_excel_dates(monkeypatch):
     assert item.summary == "API 사업 요약"
     assert item.target == "중소기업"
     assert item.hashtags == ("AI", "부산")
-    assert client.excel_attempts == [1]
+    assert client.api_timeouts == [bizinfo.LIST_PAGE_TIMEOUT]
+    assert client.api_attempts == [None]
 
 
-def test_fetch_listings_uses_complete_api_when_excel_enrichment_fails(monkeypatch):
+def test_fetch_listings_recovers_using_only_official_api(monkeypatch):
     monkeypatch.setenv("BIZINFO_API_KEY", "configured-test-key")
     pblanc_id = "PBLN_000000000000890"
+    sleeps: list[float] = []
 
-    class ApiOnlyClient:
+    class RecoveringApiClient:
         def __init__(self):
-            self.get_calls = 0
+            self.api_attempts: list[int | None] = []
 
-        def get(self, url, params=None, timeout=None):
-            self.get_calls += 1
+        def get(self, url, params=None, timeout=None, attempts=None):
+            self.api_attempts.append(attempts)
+            if len(self.api_attempts) == 1:
+                raise ScrapeError(
+                    "failed (last error: ConnectTimeout: timed out)",
+                    kind="ConnectTimeout",
+                    transient=True,
+                )
             return json.dumps({"jsonArray": [{
                 "pblancId": pblanc_id,
-                "pblancNm": "API 단독 공고",
+                "pblancNm": "API 복구 공고",
                 "reqstBeginEndDe": "상시 접수",
                 "totCnt": "1",
             }]})
 
         def get_bytes(self, url, params=None, timeout=None, attempts=None):
-            assert attempts == 1
-            raise ScrapeError("simulated Excel enrichment outage")
+            raise AssertionError("keyed recovery must not use Excel")
 
-    client = ApiOnlyClient()
+    monkeypatch.setattr(bizinfo.time, "sleep", sleeps.append)
+    client = RecoveringApiClient()
 
     result = bizinfo.fetch_listings(client)
 
     assert result.channel == "api"
     assert result.complete is True
     assert [item.pblanc_id for item in result.items] == [pblanc_id]
-    assert client.get_calls == 1
+    assert client.api_attempts == [None, bizinfo.OUTAGE_RECOVERY_REQUEST_ATTEMPTS]
+    assert sleeps == [bizinfo.OUTAGE_RETRY_DELAY_SECONDS]
 
 
 def test_fetch_listings_complete_when_all_pages_succeed():
@@ -310,8 +345,49 @@ def test_fetch_listings_retries_excel_after_origin_outage(
     assert [item.pblanc_id for item in result.items] == [pblanc_id]
     assert sleeps == [bizinfo.OUTAGE_RETRY_DELAY_SECONDS]
     assert client.excel_calls == len(bizinfo.BASE_MIRRORS) + 1
-    assert client.excel_attempts == [None, bizinfo.BACKUP_HOST_ATTEMPTS, None]
+    assert client.excel_attempts == [
+        None,
+        bizinfo.BACKUP_HOST_ATTEMPTS,
+        bizinfo.OUTAGE_RECOVERY_REQUEST_ATTEMPTS,
+    ]
     assert client.html_calls == 0
+
+
+def test_fetch_listings_uses_full_recovery_window_after_origin_outage(monkeypatch):
+    monkeypatch.setenv("BIZINFO_API_KEY", "configured-test-key")
+    sleeps: list[float] = []
+
+    class UnreachableApiClient:
+        def __init__(self):
+            self.api_attempts: list[int | None] = []
+
+        def get(self, url, params=None, timeout=None, attempts=None):
+            self.api_attempts.append(attempts)
+            raise ScrapeError(
+                "failed (last error: ConnectTimeout: timed out)",
+                kind="ConnectTimeout",
+                transient=True,
+            )
+
+        def get_bytes(self, url, params=None, timeout=None, attempts=None):
+            raise AssertionError("keyed recovery must not use Excel")
+
+    monkeypatch.setattr(bizinfo.time, "sleep", sleeps.append)
+    client = UnreachableApiClient()
+
+    with pytest.raises(ScrapeError, match="official API unavailable"):
+        bizinfo.fetch_listings(client)
+
+    assert sleeps == [
+        bizinfo.OUTAGE_RETRY_DELAY_SECONDS,
+    ] * bizinfo.OUTAGE_RECOVERY_ROUNDS
+    assert client.api_attempts == [
+        None,
+        *[
+            bizinfo.OUTAGE_RECOVERY_REQUEST_ATTEMPTS
+            for _ in range(bizinfo.OUTAGE_RECOVERY_ROUNDS)
+        ],
+    ]
 
 
 def test_list_page_timeout_can_be_overridden_for_diagnostics(monkeypatch):
@@ -320,7 +396,7 @@ def test_list_page_timeout_can_be_overridden_for_diagnostics(monkeypatch):
     assert bizinfo._list_page_timeout() == 45.0
 
 
-@pytest.mark.parametrize("value", ["zero", "0", "121"])
+@pytest.mark.parametrize("value", ["zero", "0", "901"])
 def test_list_page_timeout_rejects_invalid_values(monkeypatch, value):
     monkeypatch.setenv("BIZINFO_LIST_PAGE_TIMEOUT", value)
 

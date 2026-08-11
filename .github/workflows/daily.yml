@@ -29,7 +29,9 @@ concurrency:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Bizinfo prioritizes fresh data over quick cache fallback and may keep
+    # retrying a temporarily unreachable origin for roughly 75 minutes.
+    timeout-minutes: 180
     permissions:
       contents: read
     steps:

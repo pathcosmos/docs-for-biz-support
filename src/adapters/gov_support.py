@@ -86,14 +86,17 @@ def fetch() -> list[Item]:
 
 @register("gov-support")
 def fetch_result() -> AdapterResult:
-    """Aggregate sources, then enrich NEW bizinfo items via DETAIL fetch,
-    then sort by deadline. Caller is the scrape stage which feeds the result
-    into diff + DB write."""
+    """Aggregate sources and sort by deadline for the scrape stage.
+
+    Keyed Bizinfo API results already include summary/target/hashtags, so they
+    never trigger an additional unauthenticated DETAIL-page request.
+    """
     items: list[Item] = []
     reports: list[SourceReport] = []
     with HttpClient() as client:
         # --- 1. bizinfo list ---
         bizinfo_fallback_items: list[Item] = []
+        bizinfo_channel: str | None = None
         try:
             bizinfo_result = fetch_bizinfo(client)
         except ScrapeError as e:
@@ -115,6 +118,7 @@ def fetch_result() -> AdapterResult:
         else:
             if bizinfo_result.complete:
                 bizinfo_raws = bizinfo_result.items
+                bizinfo_channel = bizinfo_result.channel
                 reports.append(SourceReport(
                     source_key=SOURCE_KEY_BIZINFO, status="fresh",
                     item_count=len(bizinfo_raws),
@@ -209,13 +213,23 @@ def fetch_result() -> AdapterResult:
                 )
                 reports.append(fallback_report)
 
-        # --- 5. Identify which bizinfo stable_ids are NEW (need detail fetch).
+        # --- 5. Identify which legacy bizinfo stable_ids need DETAIL fetch.
+        # API records already contain the enrichment fields we use for labels,
+        # so the keyed production path must remain API-only end to end.
         # Look up existing stable_ids in the DB; today's scrape is "new" for
         # any id not already there. We do this in a single SELECT regardless
         # of how many ids we have (Turso handles it).
         bizinfo_ids = {f"{SOURCE_KEY_BIZINFO}:{r.pblanc_id}" for r in bizinfo_raws}
-        existing = _lookup_existing(bizinfo_ids) if bizinfo_ids else set()
-        new_bizinfo_ids = bizinfo_ids - existing
+        if bizinfo_channel == "api":
+            new_bizinfo_ids: set[str] = set()
+            if bizinfo_ids:
+                logger.info(
+                    "gov-support: %d bizinfo API items; DETAIL fetch disabled",
+                    len(bizinfo_ids),
+                )
+        else:
+            existing = _lookup_existing(bizinfo_ids) if bizinfo_ids else set()
+            new_bizinfo_ids = bizinfo_ids - existing
         if new_bizinfo_ids:
             logger.info(
                 "gov-support: %d total bizinfo items, %d new → detail fetch",
@@ -346,12 +360,10 @@ def _lookup_existing(stable_ids: set[str]) -> set[str]:
 
 
 def _from_bizinfo(r: BizinfoRaw, det: BizinfoDetail | None) -> Item:
-    """Bizinfo row → Item. When DETAIL data is present (NEW items), we merge
-    in summary/hashtags and run the GPU·AI keyword matcher across title +
-    summary + hashtags + organizer."""
+    """Bizinfo row → Item, preferring fields supplied by the keyed API."""
     summary = (det.summary if det else None) or r.summary
     hashtags = list(dict.fromkeys([*r.hashtags, *(det.hashtags if det else ())]))
-    region = (det.region if det else None) or None
+    region = (det.region if det else None) or r.region
     target = (det.target if det else None) or r.target
     amount = (det.amount if det else None) or None
 
@@ -366,8 +378,8 @@ def _from_bizinfo(r: BizinfoRaw, det: BizinfoDetail | None) -> Item:
         stable_id=f"{SOURCE_KEY_BIZINFO}:{r.pblanc_id}",
         source_key=SOURCE_KEY_BIZINFO,
         title=r.title,
-        detail_url=bizinfo_detail_url(r.pblanc_id),
-        category=None,
+        detail_url=r.detail_url or bizinfo_detail_url(r.pblanc_id),
+        category=r.support_field,
         organizer=r.organizer,
         amount=amount,
         apply_period=r.apply_period,
