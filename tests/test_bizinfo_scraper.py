@@ -12,6 +12,7 @@ from src.scrapers.base import HttpClient, ScrapeError
 @pytest.fixture(autouse=True)
 def _disable_real_api_key(monkeypatch):
     monkeypatch.delenv("BIZINFO_API_KEY", raising=False)
+    monkeypatch.delenv("BIZINFO_API_PAYLOAD_PATH", raising=False)
     monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
 
 
@@ -134,6 +135,79 @@ def test_official_api_parser_validates_total_and_keeps_enrichment(response_shape
     assert items[0].hashtags == ("AI", "부산")
     assert items[0].region == "부산"
     assert items[0].detail_url.endswith("pblancId=PBLN_000000000000888")
+
+
+def test_fetch_listings_uses_validated_api_artifact_without_network(tmp_path, monkeypatch):
+    artifact = tmp_path / "bizinfo-api.json"
+    artifact.write_text(json.dumps({"jsonArray": [{
+        "pblancId": "PBLN_000000000000891",
+        "pblancNm": "macOS 전달 공고",
+        "reqstBeginEndDe": "20260801 ~ 20260831",
+        "hashtags": "AI,경남",
+        "totCnt": "1",
+    }]}), encoding="utf-8")
+    monkeypatch.setenv("BIZINFO_API_PAYLOAD_PATH", str(artifact))
+    monkeypatch.setenv("BIZINFO_API_KEY", "must-not-be-used")
+
+    class NoRequestClient:
+        def get(self, *args, **kwargs):
+            raise AssertionError("validated artifact path must not make a live request")
+
+    result = bizinfo.fetch_listings(NoRequestClient())
+
+    assert result.channel == "api"
+    assert result.complete is True
+    assert [item.pblanc_id for item in result.items] == ["PBLN_000000000000891"]
+    assert result.items[0].region == "경남"
+
+
+def test_fetch_listings_missing_required_artifact_fails_without_network(tmp_path, monkeypatch):
+    monkeypatch.setenv("BIZINFO_API_PAYLOAD_PATH", str(tmp_path / "missing.json"))
+
+    class NoRequestClient:
+        def get(self, *args, **kwargs):
+            raise AssertionError("missing handoff must fall back to DB cache, not live network")
+
+    with pytest.raises(ScrapeError, match="API artifact unavailable"):
+        bizinfo.fetch_listings(NoRequestClient())
+
+
+def test_fetch_official_api_payload_validates_before_handoff():
+    response = json.dumps({"jsonArray": [{
+        "pblancId": "PBLN_000000000000892",
+        "pblancNm": "검증 완료 공고",
+        "totCnt": "1",
+    }]})
+
+    class ApiClient:
+        def __init__(self):
+            self.params = None
+            self.timeout = None
+            self.attempts = None
+
+        def get(self, url, params=None, timeout=None, attempts=None):
+            self.params = params
+            self.timeout = timeout
+            self.attempts = attempts
+            return response
+
+    client = ApiClient()
+    payload, count = bizinfo.fetch_official_api_payload(
+        client,
+        "configured-test-key",
+        timeout=30,
+        attempts=1,
+    )
+
+    assert payload == response
+    assert count == 1
+    assert client.params == {
+        "crtfcKey": "configured-test-key",
+        "dataType": "json",
+        "searchCnt": 0,
+    }
+    assert client.timeout == 30
+    assert client.attempts == 1
 
 
 def test_github_actions_requires_api_key(monkeypatch):

@@ -317,6 +317,38 @@ def _run_backfill_bizinfo_api() -> int:
     return 0
 
 
+def _run_fetch_bizinfo_api_artifact(output: str, attempts: int) -> int:
+    """Fetch one validated official API payload for another runner to consume."""
+    import os
+    from pathlib import Path
+
+    from .scrapers.base import HttpClient
+    from .scrapers.bizinfo import fetch_official_api_payload
+
+    api_key = os.environ.get("BIZINFO_API_KEY", "").strip()
+    if not api_key:
+        print("ERROR: BIZINFO_API_KEY is required for API artifact collection")
+        return 1
+    if not 1 <= attempts <= 3:
+        print("ERROR: --api-attempts must be between 1 and 3")
+        return 1
+
+    with HttpClient() as http:
+        payload, count = fetch_official_api_payload(
+            http,
+            api_key,
+            attempts=attempts,
+        )
+
+    output_path = Path(output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = output_path.with_name(f".{output_path.name}.tmp")
+    temporary_path.write_text(payload, encoding="utf-8")
+    temporary_path.replace(output_path)
+    print(f"bizinfo API artifact: validated {count} items -> {output_path}")
+    return 0
+
+
 def _csv_env(name: str) -> list[str]:
     """Parse a comma-separated env var into a list of trimmed, non-empty strings."""
     import os
@@ -363,6 +395,9 @@ def main(argv: list[str] | None = None) -> int:
                        dest="backfill_bizinfo_api", action="store_true",
                        help="one-shot: use the keyed Bizinfo API to refresh summary, target, "
                             "hashtags, and GPU·AI labels for existing rows")
+    stage.add_argument("--fetch-bizinfo-api", metavar="PATH",
+                       help="fetch and validate one keyed Bizinfo API response, then write "
+                            "a key-free handoff artifact to PATH")
 
     p.add_argument("--dry-run", action="store_true",
                    help="render but do not send mail / push archive repos / write DB")
@@ -371,6 +406,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="run only the named archive(s); may be passed multiple times")
     p.add_argument("--force", action="store_true",
                    help="ignore sent-marker and re-send today (mail stage only)")
+    p.add_argument("--api-attempts", type=int, default=1,
+                   help="request attempts for --fetch-bizinfo-api (1-3; default 1)")
     p.add_argument("--date", default=None,
                    help="override 'today' as YYYY-MM-DD (KST); default = now KST")
     args = p.parse_args(argv)
@@ -387,6 +424,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.backfill_bizinfo_api:
         return _run_backfill_bizinfo_api()
+
+    if args.fetch_bizinfo_api:
+        return _run_fetch_bizinfo_api_artifact(
+            args.fetch_bizinfo_api,
+            args.api_attempts,
+        )
 
     if args.date:
         today = datetime.fromisoformat(args.date).replace(tzinfo=KST)

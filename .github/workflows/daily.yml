@@ -27,10 +27,84 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  scrape:
+  # Standard Ubuntu runners use Azure egress. Bizinfo intermittently drops
+  # TCP connections from some Azure regions, so collect and validate its
+  # public API response separately before the main scrape.
+  bizinfo-ubuntu:
+    if: ${{ github.event_name == 'schedule' || inputs.only == '' || inputs.only == 'gov-support' }}
     runs-on: ubuntu-latest
-    # Bizinfo prioritizes fresh data over quick cache fallback and may keep
-    # retrying a temporarily unreachable origin for roughly 75 minutes.
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --frozen --no-dev
+      - name: fetch and validate Bizinfo API on Ubuntu
+        env:
+          BIZINFO_API_KEY: ${{ secrets.BIZINFO_API_KEY }}
+          BIZINFO_LIST_PAGE_TIMEOUT: '30'
+        run: >-
+          uv run --frozen python -m src.cli
+          --fetch-bizinfo-api "$RUNNER_TEMP/bizinfo-api.json"
+          --api-attempts 1
+      - name: upload validated Bizinfo payload
+        uses: actions/upload-artifact@v4
+        with:
+          name: bizinfo-api-ubuntu
+          path: ${{ runner.temp }}/bizinfo-api.json
+          if-no-files-found: error
+          retention-days: 1
+
+  # A new macOS VM uses GitHub's macOS cloud rather than Azure. It runs only
+  # when the Ubuntu handoff failed, providing a genuinely different egress
+  # path instead of retrying for an hour from the same blocked source IP.
+  bizinfo-macos-fallback:
+    needs: bizinfo-ubuntu
+    if: >-
+      ${{ always()
+          && (github.event_name == 'schedule' || inputs.only == '' || inputs.only == 'gov-support')
+          && needs.bizinfo-ubuntu.result != 'success' }}
+    runs-on: macos-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --frozen --no-dev
+      - name: fetch and validate Bizinfo API on macOS
+        env:
+          BIZINFO_API_KEY: ${{ secrets.BIZINFO_API_KEY }}
+          BIZINFO_LIST_PAGE_TIMEOUT: '120'
+        run: >-
+          uv run --frozen python -m src.cli
+          --fetch-bizinfo-api "$RUNNER_TEMP/bizinfo-api.json"
+          --api-attempts 3
+      - name: upload validated Bizinfo payload
+        uses: actions/upload-artifact@v4
+        with:
+          name: bizinfo-api-macos
+          path: ${{ runner.temp }}/bizinfo-api.json
+          if-no-files-found: error
+          retention-days: 1
+
+  scrape:
+    needs: [bizinfo-ubuntu, bizinfo-macos-fallback]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    # Bizinfo network selection happens in the two jobs above. This job reads
+    # their validated, key-free handoff and performs the existing DB pipeline.
     timeout-minutes: 180
     permissions:
       contents: read
@@ -43,11 +117,18 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --frozen --no-dev
+      - name: download validated Bizinfo payload
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: bizinfo-api-*
+          path: ${{ runner.temp }}/bizinfo-input
+          merge-multiple: true
       - name: scrape and persist complete snapshots
         env:
           TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
           TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
-          BIZINFO_API_KEY: ${{ secrets.BIZINFO_API_KEY }}
+          BIZINFO_API_PAYLOAD_PATH: ${{ runner.temp }}/bizinfo-input/bizinfo-api.json
           ONLY: ${{ inputs.only }}
           DRY_RUN: ${{ inputs.dry_run }}
         run: |
