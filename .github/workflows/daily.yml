@@ -34,6 +34,8 @@ jobs:
     if: ${{ github.event_name == 'schedule' || inputs.only == '' || inputs.only == 'gov-support' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      collected: ${{ steps.fetch.outcome == 'success' }}
     permissions:
       contents: read
     steps:
@@ -46,6 +48,8 @@ jobs:
           enable-cache: true
       - run: uv sync --frozen --no-dev
       - name: fetch and validate Bizinfo API on Ubuntu
+        id: fetch
+        continue-on-error: true
         env:
           BIZINFO_API_KEY: ${{ secrets.BIZINFO_API_KEY }}
           BIZINFO_LIST_PAGE_TIMEOUT: '30'
@@ -54,6 +58,7 @@ jobs:
           --fetch-bizinfo-api "$RUNNER_TEMP/bizinfo-api.json"
           --api-attempts 1
       - name: upload validated Bizinfo payload
+        if: ${{ steps.fetch.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
           name: bizinfo-api-ubuntu
@@ -69,9 +74,11 @@ jobs:
     if: >-
       ${{ always()
           && (github.event_name == 'schedule' || inputs.only == '' || inputs.only == 'gov-support')
-          && needs.bizinfo-ubuntu.result != 'success' }}
+          && needs.bizinfo-ubuntu.outputs.collected != 'true' }}
     runs-on: macos-latest
     timeout-minutes: 15
+    outputs:
+      collected: ${{ steps.fetch.outcome == 'success' }}
     permissions:
       contents: read
     steps:
@@ -84,6 +91,8 @@ jobs:
           enable-cache: true
       - run: uv sync --frozen --no-dev
       - name: fetch and validate Bizinfo API on macOS
+        id: fetch
+        continue-on-error: true
         env:
           BIZINFO_API_KEY: ${{ secrets.BIZINFO_API_KEY }}
           BIZINFO_LIST_PAGE_TIMEOUT: '120'
@@ -92,6 +101,7 @@ jobs:
           --fetch-bizinfo-api "$RUNNER_TEMP/bizinfo-api.json"
           --api-attempts 3
       - name: upload validated Bizinfo payload
+        if: ${{ steps.fetch.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
           name: bizinfo-api-macos
