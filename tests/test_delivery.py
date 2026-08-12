@@ -4,7 +4,11 @@ import pytest
 
 from src.config.archives import ARCHIVES
 from src.mailer import gmail_smtp
-from src.push.github_push import DEFAULT_PAGES_TIMEOUT_SECONDS, wait_for_pages
+from src.push.github_push import (
+    DEFAULT_PAGES_TIMEOUT_SECONDS,
+    PagesPublishError,
+    wait_for_pages,
+)
 
 
 def test_pages_default_timeout_allows_slow_cdn_publication():
@@ -22,6 +26,39 @@ def test_wait_for_pages_retries_until_expected_document_is_visible():
         fetcher=lambda _: next(responses),
     )
     assert url.endswith("/2026-08-07.html")
+
+
+def test_wait_for_pages_accepts_html_escaped_title():
+    cfg = ARCHIVES["kstartup-mentoring"]
+    response_html = (
+        "<h1>🧭 K-Startup 멘토링 · R&amp;D</h1>"
+        "<p>2026-08-12</p>"
+    )
+
+    url = wait_for_pages(
+        cfg,
+        date(2026, 8, 12),
+        timeout_seconds=0,
+        interval_seconds=0,
+        fetcher=lambda _: response_html,
+    )
+
+    assert url.endswith("/2026-08-12.html")
+
+
+def test_wait_for_pages_timeout_identifies_missing_field():
+    cfg = ARCHIVES["kstartup-mentoring"]
+
+    with pytest.raises(
+        PagesPublishError, match=r"title_found=True, date_found=False",
+    ):
+        wait_for_pages(
+            cfg,
+            date(2026, 8, 12),
+            timeout_seconds=0,
+            interval_seconds=0,
+            fetcher=lambda _: "<h1>🧭 K-Startup 멘토링 · R&amp;D</h1>",
+        )
 
 
 def test_send_html_returns_real_message_id(monkeypatch):
