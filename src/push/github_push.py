@@ -30,6 +30,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
+from html import unescape
 from pathlib import Path
 
 import httpx
@@ -173,10 +174,19 @@ def wait_for_pages(
     last_error = "not published"
     while True:
         try:
-            html = fetch(url)
-            if cfg.title in html and today.isoformat() in html:
+            response_html = fetch(url)
+            # Renderers correctly escape visible text such as ``R&D`` to
+            # ``R&amp;D``. Compare against decoded HTML so an already-published
+            # page is not mistaken for a stale document for the full timeout.
+            decoded_html = unescape(response_html)
+            title_found = cfg.title in decoded_html
+            date_found = today.isoformat() in decoded_html
+            if title_found and date_found:
                 return url
-            last_error = "HTTP response did not contain the expected title/date"
+            last_error = (
+                "HTTP response did not contain the expected title/date "
+                f"(title_found={title_found}, date_found={date_found})"
+            )
         except Exception as exc:  # noqa: BLE001 - retry transient Pages/network failures
             last_error = f"{type(exc).__name__}: {exc}"
         remaining = deadline - time.monotonic()
