@@ -2,7 +2,11 @@ name: daily pipeline
 
 on:
   schedule:
-    - cron: '10 21 * * *' # 06:10 KST; mail starts only after every scrape succeeds
+    # 03:03 KST. GitHub's scheduler now starts this 4-6h late (median 4.3h in
+    # 2026-11), so the nominal time is set early to land the mail ~07-09 KST.
+    # Minute 3 avoids the congested top-of-hour. Mail starts only after every
+    # scrape succeeds.
+    - cron: '3 18 * * *'
   workflow_dispatch:
     inputs:
       only:
