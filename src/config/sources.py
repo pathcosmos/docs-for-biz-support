@@ -82,4 +82,13 @@ SOURCES: dict[str, SourceDef] = {
     "kstartup_biz":       SourceDef("kstartup_biz",       "K-Startup 사업소개", _kstartup_id),
     "kstartup_mentoring": SourceDef("kstartup_mentoring", "K-Startup 사업소개", _kstartup_id),
     "kstartup_global":    SourceDef("kstartup_global",    "K-Startup 사업소개", _kstartup_id),
+
+    # GPU 지원사업 전용 포털 (aiinfrahub.kr / AIDC 공고) — gov-support에 포함
+    "gpu_aiinfrahub":     SourceDef("gpu_aiinfrahub",     "AI컴퓨팅자원 포털", _numeric_path_tail),
+    "gpu_aidc":           SourceDef("gpu_aidc",           "AIDC",            _numeric_path_tail),
 }
+
+
+# GPU 지원사업 전용 포털 소스. gov-support 문서의 전용 섹션(render/curation)과
+# 어댑터(adapters/gpu_support)가 함께 참조한다.
+GPU_PORTAL_SOURCES: tuple[str, ...] = ("gpu_aiinfrahub", "gpu_aidc")

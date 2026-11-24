@@ -8,6 +8,9 @@ surface ahead of merely urgent but irrelevant ones.
 Each item appears in EXACTLY ONE section: the highest-priority section it
 matches. Priority order (safety-net first):
 
+  0. 🖥️ GPU 지원사업 공고 — GPU 전용 포털(국가 AI컴퓨팅자원 지원포털·AIDC)
+     소스의 접수중 공고. 다른 소스(기업마당·NIPA 등)의 항목은 이 섹션으로
+     옮기지 않고 아래 기존 규칙대로 둔다.
   1. 🆕🎯 신규 + 우선조건 동시충족 — active_since부터 7일간 유지
   2. 🎯 우선조건 충족 — 신규 우선노출 기간이 지난 항목
   3. 🔥 마감 임박 (D-5) — 우선조건 미충족
@@ -39,10 +42,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 
+from ..config.sources import GPU_PORTAL_SOURCES
 from ..models import Item
 from .labels import GPU_AI_BADGE, is_reannouncement, matched_regions, regional_score
 
 # 섹션 식별자 — 렌더러가 헤더 색/emoji 매핑할 때 사용.
+SEC_GPU_PORTAL    = "gpu_portal"
 SEC_NEW_PRIORITY     = "new_priority"
 SEC_PRIORITY_MATCH  = "priority_match"
 SEC_DEADLINE_5    = "deadline_5"
@@ -66,6 +71,7 @@ SECTION_MAX_ITEMS: dict[str, int] = {
 # 섹션 메타 — 헤더 출력에 사용. 색은 plan 표와 일치.
 SECTION_META: dict[str, tuple[str, str, str]] = {
     # key                 -> (emoji+title,                                        header_color,  card_border_color)
+    SEC_GPU_PORTAL:       ("🖥️ GPU 지원사업 공고 — AI컴퓨팅자원 포털·AIDC",        "#6a1b9a",    "#6a1b9a"),
     SEC_NEW_PRIORITY:     ("🆕🎯 신규 + 우선조건 동시충족",                       "#b71c1c",    "#b71c1c"),
     SEC_PRIORITY_MATCH:   ("🎯 우선조건 충족 — 부산·경남·경북 · 제조·AI · 중견·중소", "#283593", "#283593"),
     SEC_DEADLINE_5:       ("🔥 마감 임박 (D-5)",                                   "#ea4335",    "#ea4335"),
@@ -196,6 +202,11 @@ def classify_for_curation(
     pool = items_new + items_ongoing
     new_ids = {i.stable_id for i in items_new}
 
+    # 0. GPU 지원사업 전용 포털 공고 — 가장 먼저 claim해 별도 섹션에 모은다.
+    for i in pool:
+        if i.source_key in GPU_PORTAL_SOURCES:
+            _put(SEC_GPU_PORTAL, i)
+
     # 1. 신규 + 우선조건 동시충족. The one-day `new` status is not enough
     # for a seven-day feature window, so active_since tracks the current
     # active cycle. Fresh preview/test items defensively fall back to today.
@@ -286,7 +297,7 @@ def classify_for_curation(
 
     # 출력 순서대로 CurationSection 객체 빌드.
     order = [
-        SEC_NEW_PRIORITY, SEC_PRIORITY_MATCH,
+        SEC_GPU_PORTAL, SEC_NEW_PRIORITY, SEC_PRIORITY_MATCH,
         SEC_DEADLINE_5, SEC_DEADLINE_14,
         SEC_NEW_GPU, SEC_REGIONAL, SEC_GPU_ONGOING, SEC_NEW_OTHER,
         SEC_REANNOUNCE, SEC_ONGOING, SEC_ALWAYS_OPEN,

@@ -18,7 +18,7 @@
 
 | 아카이브 | 활성 소스 |
 |---|---|
-| `gov-support` | 기업마당, NIPA, IRIS, NTIS |
+| `gov-support` | 기업마당, NIPA, IRIS, NTIS, GPU 전용 포털(aiinfrahub·AIDC) |
 | `busan-startup` | 부산창업포털 실시간 접수중 API, 장기 운영시설 카탈로그 |
 | `kstartup-biz` | K-Startup 사업화 |
 | `kstartup-mentoring` | K-Startup R&D, 멘토링·컨설팅 |
@@ -27,6 +27,20 @@
 부분 페이지나 전체 수집이 실패하면 해당 소스만 마지막 `complete` 스냅샷으로
 대체합니다. 캐시도 없는 소스 실패는 전체 아카이브 실패로 처리해 대량의 거짓
 종료·신규 전환을 방지합니다.
+
+## GPU 지원사업 전용 섹션
+
+`gov-support` 메일·아카이브 최상단에 `🖥️ GPU 지원사업 공고` 섹션이 있습니다.
+GPU 전용 포털의 접수중 공고만 모읍니다. 기업마당·NIPA 등 다른 소스의 항목은
+빼지 않으며, 그 항목은 기존 `GPU·AI 인프라` 섹션 등에 그대로 남습니다.
+
+- 소스: 국가 AI컴퓨팅자원 지원포털 `aiinfrahub.kr`(`/api/projects`),
+  AIDC `aidc.atops.or.kr`(`/api/v1/csp/announcement/meta`, page는 1부터).
+- 포털별로 독립 수집하고, 실패한 포털만 자기 마지막 `complete` 스냅샷으로
+  대체합니다. 캐시도 없으면 다른 소스와 같이 아카이브 실패로 처리합니다.
+- `aiinfrahub.kr`은 TLS 중간 인증서를 보내지 않아
+  `src/scrapers/certs/globalsign-gcc-r6-alphassl-ca-2025.pem`을 이 사이트에만
+  추가 신뢰 앵커로 씁니다(검증을 끄지 않음). 서버가 인증서를 교체하면 갱신하세요.
 
 ## 정부지원 메일 우선순위
 

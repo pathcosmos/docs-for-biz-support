@@ -44,7 +44,7 @@ ARCHIVES: dict[str, ArchiveConfig] = {
         cc_env="MAIL_CC_GOV_SUPPORT",
         # Only live adapters belong here. Planned sources remain documented in
         # config/sources.py but must not be advertised as active coverage.
-        sources=("bizinfo", "nipa", "iris", "ntis"),
+        sources=("bizinfo", "nipa", "iris", "ntis", "gpu_aiinfrahub", "gpu_aidc"),
         categories=None,
         curation_enabled=True,
     ),

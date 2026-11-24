@@ -5,10 +5,13 @@ and exposes a uniform exception so adapters can decide whether to surface a
 
 from __future__ import annotations
 
+import ssl
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Self
 
+import certifi
 import httpx
 
 DEFAULT_TIMEOUT = 20.0
@@ -50,9 +53,19 @@ class HttpClient:
     user_agent: str = DEFAULT_UA
     timeout: float = DEFAULT_TIMEOUT
     retries: int = DEFAULT_RETRIES
+    # PEM file with extra intermediate CA certificates to trust *in addition*
+    # to certifi's roots. For servers that send only their leaf certificate
+    # (browsers repair this via AIA fetching; Python does not). Verification
+    # stays enabled — this never disables TLS checks.
+    extra_ca_file: Path | None = None
 
     def __post_init__(self) -> None:
+        verify: ssl.SSLContext | bool = True
+        if self.extra_ca_file is not None:
+            verify = ssl.create_default_context(cafile=certifi.where())
+            verify.load_verify_locations(cafile=str(self.extra_ca_file))
         self._client = httpx.Client(
+            verify=verify,
             headers={
                 "User-Agent": self.user_agent,
                 "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.5",

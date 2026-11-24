@@ -18,6 +18,8 @@ def _disable_unrelated_live_sources(monkeypatch):
     monkeypatch.setattr(
         gov_support, "fetch_ntis", lambda client: NtisListResult(items=[], complete=True),
     )
+    # GPU 포털(aiinfrahub/AIDC)은 test_gpu_support.py에서 따로 검증한다 — 여기선 오프라인 유지.
+    monkeypatch.setattr(gov_support, "fetch_gpu_portals", lambda fallback: ([], []))
 
 
 def _isolated_db(tmp_path, monkeypatch):

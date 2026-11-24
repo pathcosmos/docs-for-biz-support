@@ -64,6 +64,7 @@ from ..scrapers.ntis import (
     fetch_listings as fetch_ntis,
 )
 from . import register
+from .gpu_support import fetch_portals as fetch_gpu_portals
 
 logger = logging.getLogger(__name__)
 
@@ -258,6 +259,12 @@ def fetch_result() -> AdapterResult:
     items.extend(iris_fallback_items)
     items.extend(_from_ntis(r) for r in ntis_raws)
     items.extend(ntis_fallback_items)
+
+    # --- 7b. GPU 지원사업 포털 (전용 섹션용). 다른 소스와 독립적으로 수집하며
+    # 실패한 포털만 자기 캐시로 대체한다. 기업마당·NIPA 항목은 그대로 둔다.
+    gpu_items, gpu_reports = fetch_gpu_portals(_fallback_from_cache)
+    items.extend(gpu_items)
+    reports.extend(gpu_reports)
 
     # --- 8. Sort by deadline asc, None last (stable for ties)
     items.sort(key=lambda i: i.deadline or _FAR_FUTURE)
