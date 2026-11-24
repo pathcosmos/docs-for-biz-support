@@ -7,6 +7,11 @@ on:
     # Minute 3 avoids the congested top-of-hour. Mail starts only after every
     # scrape succeeds.
     - cron: '3 18 * * *'
+    # Backup triggers: GitHub occasionally drops a scheduled run entirely
+    # (2026-11-24 03:03 never started). The durable sent marker makes a second
+    # run a no-op for mail, so extra triggers are safe.
+    - cron: '47 20 * * *'
+    - cron: '17 22 * * *'
   workflow_dispatch:
     inputs:
       only:
